@@ -29,12 +29,13 @@
 
 /* ---------- Incoming call ---------- */
 .incoming-call {
-  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px;
+  position: fixed; inset: 0; z-index: 80; display: flex; overflow-y: auto;
+  padding: max(20px, var(--safe-top)) max(16px, var(--safe-right)) max(20px, var(--safe-bottom)) max(16px, var(--safe-left));
   background: rgba(6, 8, 18, 0.65); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   animation: fade 0.2s ease;
 }
 .incoming-card {
-  width: 100%; max-width: 360px; padding: 40px 24px 30px; text-align: center; color: #fff;
+  width: 100%; max-width: 360px; margin: auto; padding: 40px 24px 30px; text-align: center; color: #fff;
   border-radius: 28px; background: linear-gradient(160deg, #2a2d6b, #4b2d78 60%, #1f2547);
   box-shadow: var(--shadow-lg); animation: pop 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -70,7 +71,7 @@
 .call-screen.has-remote-video .call-center { opacity: 0; pointer-events: none; }
 
 .call-topbar {
-  position: absolute; top: calc(14px + var(--safe-top)); left: 16px; right: 16px;
+  position: absolute; top: calc(14px + var(--safe-top)); left: calc(16px + var(--safe-left)); right: calc(16px + var(--safe-right));
   display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
 }
 .call-pill {
@@ -82,7 +83,7 @@
 .call-pill.warn { background: rgba(245, 158, 11, 0.85); color: #111; }
 
 .local-preview {
-  position: absolute; right: 16px; top: calc(60px + var(--safe-top));
+  position: absolute; right: calc(16px + var(--safe-right)); top: calc(60px + var(--safe-top));
   width: clamp(96px, 22vw, 200px); aspect-ratio: 3 / 4;
   border-radius: 16px; overflow: hidden; background: #1f2233;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); border: 2px solid rgba(255, 255, 255, 0.25);
@@ -101,4 +102,10 @@
 }
 .call-screen[data-call-type='audio'] .video-only { display: none; }
 
-.enable-audio { position: absolute; left: 50%; bottom: calc(130px + var(--safe-bottom)); transform: translateX(-50%); z-index: 4; }
+.enable-audio { position: absolute; left: 50%; bottom: calc(130px + var(--safe-bottom)); transform: translateX(-50%); z-index: 4; white-space: nowrap; }
+
+/* Landscape screens (desktops, rotated phones): show the whole remote picture, so a
+   portrait phone camera is not cropped to a strip; portrait screens keep filling. */
+@media (orientation: landscape) {
+  .remote-video { object-fit: contain; }
+}

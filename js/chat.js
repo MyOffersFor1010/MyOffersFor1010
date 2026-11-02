@@ -863,8 +863,19 @@ function bindUi() {
   });
   input.addEventListener('blur', () => stopTyping());
 
-  $('messages-scroller').addEventListener('scroll', () => {
-    if (isNearBottom(60)) {
+  // The keyboard opening, a rotation or a growing composer shrink the message list:
+  // stay on the newest message if the user was there. The composer's height also
+  // places the scroll-to-bottom button just above it (chat.css).
+  const scroller = $('messages-scroller');
+  let stickToBottom = true;
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(() => { if (stickToBottom) scroller.scrollTop = scroller.scrollHeight; }).observe(scroller);
+    new ResizeObserver(() => form.parentElement.style.setProperty('--composer-height', `${form.offsetHeight}px`)).observe(form);
+  }
+
+  scroller.addEventListener('scroll', () => {
+    stickToBottom = isNearBottom(60);
+    if (stickToBottom) {
       newBelowCount = 0;
       $('scroll-bottom-count').hidden = true;
       $('scroll-bottom').hidden = true;

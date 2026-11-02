@@ -20,6 +20,34 @@ export function setBootMessage(text) {
   $('boot-message').textContent = text;
 }
 
+/**
+ * Keeps --vv-height / --vv-top equal to the part of the screen that is actually
+ * visible. iOS (and browsers ignoring interactive-widget) open the keyboard over the
+ * page and scroll it instead of resizing it; the app (chat.css) follows these values so
+ * the header stays on screen and the composer sits right above the keyboard. While the
+ * user pinch-zooms the values are dropped and the page behaves normally.
+ */
+export function trackVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement.style;
+  let frame = 0;
+  const update = () => {
+    frame = 0;
+    if (Math.abs(vv.scale - 1) > 0.01) {
+      root.removeProperty('--vv-height');
+      root.removeProperty('--vv-top');
+      return;
+    }
+    root.setProperty('--vv-height', `${Math.round(vv.height)}px`);
+    root.setProperty('--vv-top', `${Math.max(0, Math.round(vv.offsetTop))}px`);
+  };
+  const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
+  vv.addEventListener('resize', schedule);
+  vv.addEventListener('scroll', schedule);
+  update();
+}
+
 /* ---------- Toasts ---------- */
 export function toast(message, { type = 'info', duration = 4000 } = {}) {
   const region = $('toast-region');

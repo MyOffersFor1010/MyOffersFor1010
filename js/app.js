@@ -34,7 +34,7 @@ import { requestNotificationPermission } from './permissions.js';
 import { initPublicPages, showHome, openLogin, showDecoy, isDecoyShown, clearPageHistory } from './decoy.js';
 import {
   $, showScreen, isScreenShown, setBootMessage, toast, confirmDialog, choiceDialog, closeModal,
-  paintAvatar, formatLastSeen, friendlyError, setButtonLoading,
+  paintAvatar, formatLastSeen, friendlyError, setButtonLoading, trackVisualViewport,
 } from './ui.js';
 
 // Tapping a notification while the app is open shows the password screen instead of
@@ -42,7 +42,10 @@ import {
 const LOCK_ON_NOTIFICATION_TAP = true;
 const PRESENCE_REFRESH_MS = 15_000;
 const TRANSIENT_ERRORS = new Set(['unavailable', 'deadline-exceeded', 'auth/network-request-failed']);
-const mobileQuery = window.matchMedia('(max-width: 820px)');
+// One pane at a time (sidebar <-> conversation): narrow screens and phones held
+// sideways. Must stay identical to the "compact" query in css/responsive.css.
+const COMPACT_QUERY = '(max-width: 820px), (max-height: 500px) and (max-width: 950px) and (pointer: coarse)';
+const mobileQuery = window.matchMedia(COMPACT_QUERY);
 
 let session = null;   // { user, authTime, peerUid, myData, peerData, markers, wipe, unsubs: [], timers: [], releaseTab }
 let priv = null;      // { presence, chat, calls, webrtc } once loaded by the gate
@@ -69,6 +72,7 @@ async function loadPrivateModules() {
 async function main() {
   applyTheme();
   showScreen('boot');
+  trackVisualViewport();
   initAudioUnlock();
   initPwa();
   initPublicPages();
@@ -585,8 +589,13 @@ function bindGlobal() {
   window.addEventListener('popstate', () => {
     if (mobileQuery.matches && $('app-screen').classList.contains('show-chat')) showSidebar();
   });
+  // Rotating a tablet or resizing a window across the breakpoint: the conversation
+  // counts as shown (read receipts) only when it is really on screen, never while locked.
   mobileQuery.addEventListener?.('change', (e) => {
-    if (!e.matches) { $('app-screen').classList.add('show-chat'); priv?.chat.setChatShown(true); }
+    if (!e.matches) $('app-screen').classList.add('show-chat');
+    if (session && !session.locked) {
+      priv?.chat.setChatShown(!e.matches || $('app-screen').classList.contains('show-chat'));
+    }
   });
 
   const attention = () => { if (!session?.locked) priv?.chat.onChatAttention(); };

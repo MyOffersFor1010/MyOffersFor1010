@@ -2,11 +2,20 @@
    My Offers — application layout, sidebar, conversation, composer
    ========================================================================= */
 
+/* --vv-height / --vv-top follow the visible viewport (ui.js trackVisualViewport), so on
+   iOS the open keyboard shrinks the app instead of covering the composer. Without them:
+   100dvh; without dvh support the fixed inset alone fills the screen. */
 .app {
-  position: fixed; inset: 0;
+  position: fixed; inset: 0; bottom: auto;
   display: grid; grid-template-columns: minmax(300px, 360px) 1fr;
   background: var(--bg);
-  height: 100dvh;
+  height: 100%;
+  height: var(--vv-height, 100dvh);
+  transform: translateY(var(--vv-top, 0px));
+  padding-left: var(--safe-left); padding-right: var(--safe-right);
+}
+@media (min-width: 1600px) {
+  .app { grid-template-columns: 400px 1fr; }
 }
 
 /* ---------- Sidebar ---------- */
@@ -183,7 +192,8 @@
 @keyframes typing { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-5px); opacity: 1; } }
 
 .scroll-bottom {
-  position: absolute; right: 18px; bottom: calc(84px + var(--safe-bottom)); z-index: 3;
+  /* --composer-height is measured in chat.js (the composer grows with the text). */
+  position: absolute; right: 18px; bottom: calc(var(--composer-height, 67px + var(--safe-bottom)) + 16px); z-index: 3;
   display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%;
   border: 1px solid var(--border); background: var(--surface); color: var(--text-2); box-shadow: var(--shadow-md);
   animation: pop 0.2s ease;

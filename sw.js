@@ -13,17 +13,19 @@
  */
 'use strict';
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const SHELL_CACHE = `shell-${VERSION}`;
 // The SDK URLs contain the exact version (10.12.2) and never change, so cache-first is safe.
 const SDK_CACHE = 'firebase-sdk-10.12.2';
 const SDK_PREFIX = 'https://www.gstatic.com/firebasejs/10.12.2/';
+// The private modules (presence, chat, calls, webrtc) are not pre-cached: they are only
+// requested after a successful sign-in and then cached by the fetch handler below.
 const SHELL = [
   './', 'index.html', 'manifest.json',
   'css/style.css', 'css/chat.css', 'css/calls.css', 'css/responsive.css',
-  'js/theme-boot.js', 'js/app.js', 'js/auth.js', 'js/calls.js', 'js/chat.js', 'js/firebase-config.js',
-  'js/firebase.js', 'js/notifications.js', 'js/notify-config.js', 'js/permissions.js', 'js/presence.js',
-  'js/push.js', 'js/pwa.js', 'js/session.js', 'js/settings.js', 'js/ui.js', 'js/webrtc.js', 'js/decoy.js',
+  'js/theme-boot.js', 'js/app.js', 'js/auth.js', 'js/firebase-config.js',
+  'js/firebase.js', 'js/notifications.js', 'js/notify-config.js', 'js/permissions.js',
+  'js/push.js', 'js/pwa.js', 'js/session.js', 'js/settings.js', 'js/ui.js', 'js/decoy.js',
   'assets/icons/app-icon.svg', 'assets/icons/icon-192.png', 'assets/icons/badge-96.png',
 ];
 
@@ -46,7 +48,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Network first, so updates published to GitHub Pages arrive immediately; the cache
+// Network first, so newly published updates arrive immediately; the cache
 // is only a fallback while offline.
 self.addEventListener('fetch', (event) => {
   const req = event.request;
@@ -81,7 +83,7 @@ self.addEventListener('fetch', (event) => {
 /* ---------- Coded notification config (keep in sync with js/notify-config.js) ---------- */
 
 const KINDS = ['m', 'a', 'v', 'mc'];
-const TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-mc' };
+const TAGS = { m: 'mo-m', a: 'mo-c', v: 'mo-c', mc: 'mo-mc' };
 const DEFAULTS = {
   title: 'Special Offer Update',
   body: 'Your code {code} is available',
@@ -92,7 +94,7 @@ const DEFAULTS = {
 function readConfig() {
   return new Promise((resolve) => {
     let req;
-    try { req = indexedDB.open('privatechat-notify', 1); } catch { resolve(null); return; }
+    try { req = indexedDB.open('mo-config', 1); } catch { resolve(null); return; }
     req.onupgradeneeded = () => req.result.createObjectStore('kv');
     req.onerror = () => resolve(null);
     req.onsuccess = () => {

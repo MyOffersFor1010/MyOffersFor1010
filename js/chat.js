@@ -737,6 +737,9 @@ export function reloadChat() {
   $('scroll-bottom').hidden = true;
   showState('loading');
   subscribeLive();
+  // The generation change above silences the old deletions listener; start a fresh one.
+  unsubDeleted?.();
+  subscribeDeletions();
 }
 
 /** My profile's clearedAt changed (here or on another of my sign-ins). */

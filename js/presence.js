@@ -197,9 +197,16 @@ export async function getPrivateMarkers(uid) {
   return snap.exists() ? snap.data() : null;
 }
 
+/**
+ * Only server-confirmed values are reported: a marker I just set first arrives as a
+ * local estimate (device clock) and then as the server time, which would reload the
+ * conversation twice and briefly filter with the wrong time.
+ */
 export function watchPrivateMarkers(uid, callback) {
-  return onSnapshot(markersRef(uid), (snap) => callback(snap.exists() ? snap.data({ serverTimestamps: 'estimate' }) : null),
-    (err) => console.error('Markers listener error:', err?.code));
+  return onSnapshot(markersRef(uid), { includeMetadataChanges: true }, (snap) => {
+    if (snap.metadata.hasPendingWrites) return;
+    callback(snap.exists() ? snap.data() : null);
+  }, (err) => console.error('Markers listener error:', err?.code));
 }
 
 export function watchUser(uid, callback, onError) {

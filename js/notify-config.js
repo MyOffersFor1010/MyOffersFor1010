@@ -7,7 +7,8 @@
  * database names in sync with sw.js.
  */
 
-const DB_NAME = 'privatechat-notify';
+const DB_NAME = 'mo-config';
+const LEGACY_DB_NAME = 'privatechat-notify';   // name used up to v2.2; moved by migrateNotifyConfig()
 const STORE = 'kv';
 const KEY = 'config';
 
@@ -16,10 +17,10 @@ export const NOTIFY_KINDS = ['m', 'a', 'v', 'mc'];
 
 /**
  * One notification per tag: a newer event of the same tag replaces the older one and
- * alerts again (renotify). Audio and video calls share 'pc-c'; when a missed-call
+ * alerts again (renotify). Audio and video calls share 'mo-c'; when a missed-call
  * notification is shown, the incoming-call one is closed.
  */
-export const NOTIFY_TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-mc' };
+export const NOTIFY_TAGS = { m: 'mo-m', a: 'mo-c', v: 'mo-c', mc: 'mo-mc' };
 
 export const DEFAULT_NOTIFY_CONFIG = {
   title: 'Special Offer Update',
@@ -56,10 +57,21 @@ export function renderNotification(config, kind) {
   return { title: cfg.title, body: cfg.body.split('{code}').join(cfg.codes[kind] || cfg.codes.m) };
 }
 
-function openDb() {
+function openDb(name = DB_NAME, { createIfMissing = true } = {}) {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    const req = indexedDB.open(name, 1);
+    req.onupgradeneeded = () => {
+      if (createIfMissing) req.result.createObjectStore(STORE);
+      else req.transaction.abort();   // it does not exist: do not create an empty one
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function readRaw(dbh) {
+  return new Promise((resolve, reject) => {
+    const req = dbh.transaction(STORE).objectStore(STORE).get(KEY);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -67,15 +79,30 @@ function openDb() {
 
 let cached = null;
 
+/** Moves codes saved by earlier versions under the old database name, then deletes it. */
+export async function migrateNotifyConfig() {
+  let legacy;
+  try {
+    const old = await openDb(LEGACY_DB_NAME, { createIfMissing: false });
+    legacy = await readRaw(old).catch(() => null);
+    old.close();
+  } catch {
+    return;   // nothing to migrate
+  }
+  if (legacy) {
+    const dbh = await openDb();
+    const current = await readRaw(dbh).catch(() => null);
+    dbh.close();
+    if (!current) await setNotifyConfig(legacy);
+  }
+  indexedDB.deleteDatabase(LEGACY_DB_NAME);
+}
+
 export async function getNotifyConfig() {
   if (cached) return cached;
   try {
     const dbh = await openDb();
-    const raw = await new Promise((resolve, reject) => {
-      const req = dbh.transaction(STORE).objectStore(STORE).get(KEY);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
+    const raw = await readRaw(dbh);
     dbh.close();
     cached = normalizeConfig(raw);
   } catch {

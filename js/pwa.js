@@ -22,7 +22,7 @@ const isIos = () =>
 
 export function initPwa() {
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    // Relative URL: scope is the app folder, so it also works under /PrivateChat/ on GitHub Pages.
+    // Relative URL: scope is the app folder, so it also works when hosted under a sub-path.
     registration = navigator.serviceWorker.register('./sw.js').catch((err) => {
       console.warn('Service worker registration failed.', err?.name || '');
       return null;

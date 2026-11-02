@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  PrivateChat configuration — EDIT THIS FILE BEFORE DEPLOYING
+ *  App configuration — EDIT THIS FILE BEFORE DEPLOYING
  * ============================================================================
  *
  *  1. FIREBASE_CONFIG: paste the web-app config from
@@ -74,4 +74,4 @@ export const ICE_TRANSPORT_POLICY = 'all';
 /** The single shared conversation document id. Must match firestore.rules. */
 export const CONVERSATION_ID = 'main';
 
-export const APP_VERSION = '2.2.0';
+export const APP_VERSION = '2.3.0';

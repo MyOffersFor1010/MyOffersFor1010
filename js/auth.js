@@ -65,7 +65,9 @@ export function initLoginForm() {
       signedInHere = true;
       const cred = await signInWithEmailAndPassword(auth, email, password);
       if (!isAllowedUid(cred.user.uid)) {
-        await signOut(auth);
+        // A real account that is not allowed here: same member page as a wrong password.
+        signedInHere = false;
+        await signOut(auth).catch(() => {});
         $('login-password').value = '';
         showDecoy();
         return;
@@ -79,6 +81,8 @@ export function initLoginForm() {
         showDecoy();
         return;
       }
+      // Not a wrong password (that path stays silent): keep the code for troubleshooting.
+      console.warn('Sign-in failed:', err?.code || err?.name || '');
       showLoginError(friendlyError(err, 'Sign-in failed. Please try again.'));
     } finally {
       submitting = false;
@@ -115,14 +119,13 @@ export function initLoginForm() {
 }
 
 /**
- * Calls back with (user | null). Unauthorized users are signed out immediately and
- * reported as `rejected: true`.
+ * Calls back with (user | null). Accounts that are not allowed are signed out
+ * immediately and reported as `rejected: true`; no message ever says why.
  */
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, async (user) => {
     if (user && !isAllowedUid(user.uid)) {
       await signOut(auth).catch(() => {});
-      showLoginError('This account is not authorized to use this app.');
       callback(null, { rejected: true });
       return;
     }

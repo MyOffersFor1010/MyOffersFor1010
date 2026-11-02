@@ -5,12 +5,15 @@
 
 export const $ = (id) => document.getElementById(id);
 
+// boot = splash, home = public homepage, decoy = member page after a failed sign-in,
+// cover = the app is in use in another tab, app = the real application.
+const SCREENS = ['boot', 'home', 'login', 'decoy', 'cover', 'app'];
+
 export function showScreen(name) {
-  $('boot-screen').hidden = name !== 'boot';
-  $('login-screen').hidden = name !== 'login';
-  $('app-screen').hidden = name !== 'app';
-  $('decoy-screen').hidden = name !== 'decoy';
+  for (const s of SCREENS) $(`${s}-screen`).hidden = s !== name;
 }
+
+export const isScreenShown = (name) => !$(`${name}-screen`).hidden;
 
 export function setBootMessage(text) {
   $('boot-message').textContent = text;
@@ -48,14 +51,15 @@ export function toast(message, { type = 'info', duration = 4000 } = {}) {
 }
 
 /* ---------- Modals ---------- */
-let openModalEl = null;
-let lastFocus = null;
+// Dialogs can open on top of each other (a confirmation over Settings), so each one
+// remembers where focus was and Escape always closes the topmost one.
+const modalStack = [];   // [{ modal, lastFocus }]
 
 export function openModal(id) {
   const modal = $(id);
-  lastFocus = document.activeElement;
+  if (!modal.hidden) return;
+  modalStack.push({ modal, lastFocus: document.activeElement });
   modal.hidden = false;
-  openModalEl = modal;
   const focusable = modal.querySelector('input, select, button:not([data-close]):not([data-cancel])');
   focusable?.focus({ preventScroll: true });
 }
@@ -64,7 +68,9 @@ export function closeModal(id) {
   const modal = $(id);
   if (modal.hidden) return;
   modal.hidden = true;
-  if (openModalEl === modal) openModalEl = null;
+  const i = modalStack.findIndex((m) => m.modal === modal);
+  if (i < 0) return;
+  const [{ lastFocus }] = modalStack.splice(i, 1);
   if (lastFocus && document.contains(lastFocus)) lastFocus.focus({ preventScroll: true });
 }
 
@@ -74,7 +80,9 @@ export function bindModalDismiss(id) {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && openModalEl && openModalEl.id !== 'confirm-modal') closeModal(openModalEl.id);
+  const top = modalStack[modalStack.length - 1]?.modal;
+  // The confirm and choice dialogs handle Escape themselves (they must resolve their promise).
+  if (e.key === 'Escape' && top && top.id !== 'confirm-modal' && top.id !== 'choice-modal') closeModal(top.id);
 });
 
 /** Promise-based confirmation dialog. Resolves true/false. */
@@ -209,8 +217,9 @@ export function formatListTime(date) {
   return shortDateFmt.format(date);
 }
 
-export function formatLastSeen(date) {
-  const diffMin = Math.floor((Date.now() - date.getTime()) / 60000);
+/** `now` should be the server-corrected time, so a wrong device clock does not skew it. */
+export function formatLastSeen(date, now = Date.now()) {
+  const diffMin = Math.floor((now - date.getTime()) / 60000);
   if (diffMin < 1) return 'last seen just now';
   if (diffMin < 60) return `last seen ${diffMin} min ago`;
   const label = formatDayLabel(date);
@@ -240,27 +249,25 @@ export function setButtonLoading(btn, loading) {
   btn.classList.toggle('loading', loading);
 }
 
-/** Maps Firebase error codes to readable messages without leaking internals. */
+/**
+ * Maps error codes to ordinary messages any website might show. Nothing here may
+ * mention Firebase, rules, configuration or how access is restricted; callers log
+ * the code to the console when it is needed for troubleshooting.
+ */
 export function friendlyError(err, fallback = 'Something went wrong. Please try again.') {
   const code = err?.code || '';
   const map = {
-    'auth/invalid-email': 'That email address is not valid.',
+    'auth/invalid-email': 'Enter a valid email address.',
     'auth/missing-password': 'Please enter your password.',
     'auth/invalid-credential': 'Incorrect email or password.',
     'auth/invalid-login-credentials': 'Incorrect email or password.',
     'auth/wrong-password': 'Incorrect email or password.',
     'auth/user-not-found': 'Incorrect email or password.',
-    'auth/user-disabled': 'This account has been disabled.',
     'auth/too-many-requests': 'Too many attempts. Please wait a few minutes and try again.',
-    'auth/network-request-failed': 'Network error. Check your connection.',
-    'auth/operation-not-allowed': 'Email/password sign-in is not enabled for this Firebase project.',
-    'auth/unauthorized-domain': 'This domain is not in Firebase Authentication → Authorized domains.',
-    'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'Firebase is not configured. Edit js/firebase-config.js.',
-    'auth/invalid-api-key': 'Firebase is not configured. Edit js/firebase-config.js.',
-    'permission-denied': 'Access denied by security rules. Check the UID allowlist in firestore.rules.',
+    'auth/network-request-failed': 'You’re offline. Check your connection.',
+    'permission-denied': 'Not allowed. Please sign in again.',
     'unavailable': 'Service temporarily unavailable. You may be offline.',
-    'failed-precondition': 'A required Firestore index is missing or still building. See README.',
-    'resource-exhausted': 'Firestore quota exceeded. Try again later.',
+    'resource-exhausted': 'The service is busy. Please try again later.',
     'unauthenticated': 'Your session has expired. Please sign in again.',
   };
   return map[code] || fallback;

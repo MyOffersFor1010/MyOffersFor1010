@@ -22,7 +22,8 @@ import { app, db } from './firebase.js';
 import { FCM_VAPID_KEY } from './firebase-config.js';
 import { getServiceWorker } from './pwa.js';
 
-const TOKEN_ID_KEY = 'privatechat.pushTokenId';
+const TOKEN_ID_KEY = 'mo.device';
+const LEGACY_TOKEN_ID_KEY = 'privatechat.pushTokenId';   // name used up to v2.2
 
 let messagingPromise = null;
 
@@ -65,7 +66,10 @@ export async function enablePush(uid, authTime) {
   if (!token) return false;
   const id = await sha256Hex(token);
   await setDoc(tokenRef(uid, id), { token, authTime, updatedAt: serverTimestamp() });
-  try { localStorage.setItem(TOKEN_ID_KEY, id); } catch { /* only used to remove it later */ }
+  try {
+    localStorage.setItem(TOKEN_ID_KEY, id);
+    localStorage.removeItem(LEGACY_TOKEN_ID_KEY);
+  } catch { /* only used to remove it later */ }
   active = true;
   return true;
 }
@@ -74,7 +78,11 @@ export async function enablePush(uid, authTime) {
 export async function disablePush(uid) {
   active = false;
   let id = null;
-  try { id = localStorage.getItem(TOKEN_ID_KEY); localStorage.removeItem(TOKEN_ID_KEY); } catch { /* ignore */ }
+  try {
+    id = localStorage.getItem(TOKEN_ID_KEY) ?? localStorage.getItem(LEGACY_TOKEN_ID_KEY);
+    localStorage.removeItem(TOKEN_ID_KEY);
+    localStorage.removeItem(LEGACY_TOKEN_ID_KEY);
+  } catch { /* ignore */ }
   if (id && uid) await deleteDoc(tokenRef(uid, id)).catch(() => {});
   const m = await loadMessaging();
   if (m) await m.mod.deleteToken(m.messaging).catch(() => {});

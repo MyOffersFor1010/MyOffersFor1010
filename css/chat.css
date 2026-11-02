@@ -1,5 +1,5 @@
 /* =========================================================================
-   PrivateChat — application layout, sidebar, conversation, composer
+   My Offers — application layout, sidebar, conversation, composer
    ========================================================================= */
 
 .app {
@@ -13,7 +13,7 @@
 .sidebar {
   display: flex; flex-direction: column; min-height: 0;
   background: var(--surface); border-right: 1px solid var(--border);
-  padding-top: var(--safe-top);
+  padding-top: var(--safe-top); padding-bottom: var(--safe-bottom);
 }
 .sidebar-header {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -64,8 +64,6 @@
 .call-entry .call-info span svg { width: 13px; height: 13px; }
 .call-entry .redial { color: var(--accent); }
 .sidebar-empty { padding: 4px 20px; margin: 0; }
-.sidebar-footer { display: flex; align-items: center; gap: 6px; padding: 12px 18px calc(12px + var(--safe-bottom)); border-top: 1px solid var(--border); }
-.sidebar-footer svg { width: 14px; height: 14px; }
 
 /* ---------- Chat panel ---------- */
 .chat { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--chat-bg); }

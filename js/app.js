@@ -1,37 +1,36 @@
 /**
- * Application entry point: boot checks, auth-driven session lifecycle, single active
- * session, peer presence UI and mobile navigation. Feature logic lives in
- * chat.js / calls.js.
+ * Application entry point: boot checks, public pages, auth-driven session lifecycle,
+ * single active session and tab, peer presence UI and mobile navigation. Feature
+ * logic lives in chat.js / calls.js.
+ *
+ * Authorization gate (startSession): the private modules (presence, chat, calls,
+ * WebRTC) are loaded and started only after
+ *   1. Firebase reports a signed-in account on the allowlist,
+ *   2. this tab holds the one-active-tab lock, and
+ *   3. the server accepted this sign-in as the account's session (claimSession is a
+ *      write the security rules allow only for the two members with a current
+ *      sign-in, so its success is the server's confirmation of membership).
+ * Visitors, failed sign-ins and other accounts never load or run them.
  */
 import { isConfigured, initAppCheck } from './firebase.js';
 import { ALLOWED_UIDS, APP_VERSION } from './firebase-config.js';
 import {
   initLoginForm, watchAuth, logout, getPeerUid, showLoginError, wasSignedInHere, currentUser,
 } from './auth.js';
-import {
-  startPresence, stopPresence, watchUser, describePresence, updateDisplayName,
-  getPrivateMarkers, watchPrivateMarkers,
-} from './presence.js';
-import {
-  initChat, destroyChat, setPeerMarkers, setPeerTyping, setSidebarTyping,
-  onChatAttention, setChatShown, refreshRelativeLabels,
-  setClearedAt, reloadChat, runDeletion, clearMessagesForMe, eraseMessagesForEveryone,
-} from './chat.js';
-import {
-  initCalls, destroyCalls, isInCall, hangUp, refreshCallPeer, setCallsClearedAt, eraseCallHistory,
-} from './calls.js';
 import { initSettings, applyTheme, getPrefs } from './settings.js';
 import { initAudioUnlock, resetNotifications, notifyPrivate } from './notifications.js';
-import { hasTurnConfigured } from './webrtc.js';
+import { migrateNotifyConfig } from './notify-config.js';
 import {
-  getAuthTime, claimSession, watchSession, SessionSupersededError, SUPERSEDED_MESSAGE,
+  getAuthTime, claimSession, watchSession, claimTab, SessionSupersededError, SUPERSEDED_MESSAGE,
   startAliveMarker, stopAliveMarker, isStaleRestore, rememberSuperseded, takeSupersededNotice,
+  announceLogout, onLogoutElsewhere,
 } from './session.js';
 import { initPwa } from './pwa.js';
 import { enablePush, disablePush, pushConfigured, isPushActive } from './push.js';
 import { requestNotificationPermission } from './permissions.js';
+import { initPublicPages, showHome, openLogin, showDecoy, isDecoyShown, clearPageHistory } from './decoy.js';
 import {
-  $, showScreen, setBootMessage, toast, confirmDialog, choiceDialog, closeModal,
+  $, showScreen, isScreenShown, setBootMessage, toast, confirmDialog, choiceDialog, closeModal,
   paintAvatar, formatLastSeen, friendlyError,
 } from './ui.js';
 
@@ -39,12 +38,25 @@ const PRESENCE_REFRESH_MS = 15_000;
 const TRANSIENT_ERRORS = new Set(['unavailable', 'deadline-exceeded', 'auth/network-request-failed']);
 const mobileQuery = window.matchMedia('(max-width: 820px)');
 
-let session = null;   // { user, authTime, peerUid, myData, peerData, wipe, unsubs: [], timers: [] }
+let session = null;   // { user, authTime, peerUid, myData, peerData, markers, wipe, unsubs: [], timers: [], releaseTab }
+let priv = null;      // { presence, chat, calls, webrtc } once loaded by the gate
 let globalBound = false;
 
 const peerName = () => session?.peerData?.displayName || 'Your contact';
 const myName = () => session?.myData?.displayName || session?.user?.email?.split('@')[0] || 'Me';
 const toDate = (ts) => ts?.toDate?.() || null;
+// The page's own address without query or fragment: nothing is ever encoded in the URL.
+const homeUrl = () => location.href.split(/[?#]/)[0];
+
+async function loadPrivateModules() {
+  if (!priv) {
+    const [presence, chat, calls, webrtc] = await Promise.all([
+      import('./presence.js'), import('./chat.js'), import('./calls.js'), import('./webrtc.js'),
+    ]);
+    priv = { presence, chat, calls, webrtc };
+  }
+  return priv;
+}
 
 /* ---------- Boot ---------- */
 
@@ -53,23 +65,47 @@ async function main() {
   showScreen('boot');
   initAudioUnlock();
   initPwa();
+  initPublicPages();
+  // A page restored from the back/forward cache could show a stale view: start over.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
 
   if (!isConfigured() || ALLOWED_UIDS.length !== 2 || ALLOWED_UIDS.some((u) => u.startsWith('REPLACE_WITH'))) {
+    console.error('Configuration missing: see js/firebase-config.js.');
     document.querySelector('#boot-screen .spinner').hidden = true;
-    setBootMessage('Setup required: add your Firebase config and the two authorized UIDs to js/firebase-config.js (see README).');
+    setBootMessage('Service temporarily unavailable. Please try again later.');
     return;
   }
 
-  const superseded = takeSupersededNotice();
+  let supersededNotice = takeSupersededNotice();
+  migrateNotifyConfig().catch(() => {});
   await initAppCheck();
   initLoginForm();
   bindGlobal();
 
-  watchAuth(async (user) => {
+  $('cover-use').addEventListener('click', () => {
+    const user = currentUser();
+    if (user) startSession(user, { steal: true });
+    else showHome();
+  });
+  onLogoutElsewhere(async (uid) => {
+    if (currentUser()?.uid !== uid) return;
+    teardownSession();
+    await logout().catch(() => {});
+    location.replace(homeUrl());
+  });
+
+  watchAuth(async (user, { rejected }) => {
     if (!user) {
       teardownSession();
-      showScreen('login');
-      if (superseded) showLoginError(SUPERSEDED_MESSAGE);
+      if (rejected) {
+        showDecoy();   // an account that is not allowed: same page as a wrong password
+      } else if (supersededNotice && !isDecoyShown()) {
+        supersededNotice = false;
+        openLogin();
+        showLoginError(SUPERSEDED_MESSAGE);
+      } else if (!isScreenShown('login') && !isDecoyShown()) {
+        showHome();
+      }
       return;
     }
     if (session?.user.uid === user.uid) return;
@@ -85,12 +121,12 @@ async function main() {
 
 /* ---------- Session lifecycle ---------- */
 
-async function startSession(user) {
+async function startSession(user, { steal = false } = {}) {
   teardownSession();
   showScreen('boot');
   // Starting a session needs the server; offline it waits until the connection is back.
   const bootText = () => setBootMessage(navigator.onLine
-    ? 'Loading your conversation…'
+    ? 'Loading…'
     : 'You are offline. Waiting for an internet connection…');
   bootText();
   window.addEventListener('online', bootText);
@@ -101,78 +137,98 @@ async function startSession(user) {
   };
 
   const peerUid = getPeerUid(user.uid);
-  const s = { user, authTime: 0, peerUid, myData: null, peerData: null, markers: {}, wipe: {}, unsubs: [], timers: [] };
+  const s = {
+    user, authTime: 0, peerUid, myData: null, peerData: null, markers: {}, wipe: {},
+    unsubs: [], timers: [], releaseTab: null,
+  };
   session = s;
 
   let previous;
-  let step = 'session';
+  let step = 'tab';
   try {
-    // Become the account's only active session BEFORE touching any data: the rules
-    // reject every request from a sign-in that is not the recorded one.
+    // 1. One active tab per browser. A duplicated tab shows the cover instead; a
+    //    password typed in this tab takes over from any other tab.
+    const tab = await claimTab(user.uid, { steal: steal || wasSignedInHere(), onLost: () => lostTab(s) });
+    if (session !== s) { tab?.release(); return; }
+    if (!tab) {
+      session = null;
+      showScreen('cover');
+      return;
+    }
+    s.releaseTab = tab.release;
+
+    // 2. Become the account's only active session BEFORE touching any data: the rules
+    //    reject every request from a sign-in that is not the recorded one.
+    step = 'session';
     s.authTime = await getAuthTime(user);
     await claimSession(user.uid, s.authTime);
     if (session !== s) return;
+
+    // 3. Membership confirmed by the server: load and start the private modules.
+    step = 'modules';
+    await loadPrivateModules();
+    if (session !== s) return;
     step = 'profile';
-    previous = await startPresence(user);
-    s.markers = { pub: previous, priv: await getPrivateMarkers(user.uid) };
+    previous = await priv.presence.startPresence(user);
+    s.markers = { pub: previous, priv: await priv.presence.getPrivateMarkers(user.uid) };
   } catch (err) {
     if (session !== s) return;
     if (err instanceof SessionSupersededError) { endSuperseded(s); return; }
-    session = null;
+    teardownSession();
     // A network hiccup must not sign the user out: keep the sign-in and try again.
-    if (TRANSIENT_ERRORS.has(err?.code) || !navigator.onLine) {
+    if (TRANSIENT_ERRORS.has(err?.code) || !navigator.onLine || step === 'modules') {
+      console.warn('Session start will be retried:', step, err?.code || err?.name || '');
       setBootMessage('Connection problem. Retrying…');
       setTimeout(() => {
         if (!session && currentUser()?.uid === user.uid) startSession(user);
       }, 3000);
       return;
     }
-    const msg = err?.code !== 'permission-denied'
-      ? friendlyError(err, 'Could not connect to the database.')
-      : step === 'session'
-        ? 'Signed in, but the database refused to start a session. Publish the latest firestore.rules (they contain the new sessions/ rules) and make sure both UIDs are in them.'
-        : 'Signed in, but the database denied access. Make sure both UIDs are in firestore.rules and the rules are published.';
+    // Details go to the console only; the screen shows what any website would show.
+    console.error('Session start failed:', step, err?.code || err?.name || '');
     await logout().catch(() => {});
-    showScreen('login');
-    showLoginError(msg);
+    openLogin();
+    showLoginError('Something went wrong. Please try again.');
     return;
   } finally {
     stopBootText();
   }
   if (session !== s) return;
 
+  const { presence, chat, calls, webrtc } = priv;
+  clearPageHistory();
   startAliveMarker();
   s.unsubs.push(watchSession(user.uid, s.authTime, () => endSuperseded(s)));
 
   s.myData = previous;
-  s.unsubs.push(watchUser(user.uid, (data) => {
+  s.unsubs.push(presence.watchUser(user.uid, (data) => {
     s.myData = data;
     renderMe();
     s.markers.pub = data;   // legacy location of the "deleted for me" markers
     applyMarkers(s);
     noteWipe(s, 'me', data);
   }));
-  s.unsubs.push(watchPrivateMarkers(user.uid, (data) => {
+  s.unsubs.push(presence.watchPrivateMarkers(user.uid, (data) => {
     s.markers.priv = data;
     applyMarkers(s);
   }));
-  s.unsubs.push(watchUser(peerUid, (data) => {
+  s.unsubs.push(presence.watchUser(peerUid, (data) => {
     s.peerData = data;
     renderPeer();
-    setPeerMarkers({ lastReadAt: data?.lastReadAt, lastDeliveredAt: data?.lastDeliveredAt });
+    chat.setPeerMarkers({ lastReadAt: data?.lastReadAt, lastDeliveredAt: data?.lastDeliveredAt });
     noteWipe(s, 'peer', data);
   }, (err) => toast(friendlyError(err, 'Could not load contact status.'), { type: 'error' })));
 
   initSettings({
     onSaveDisplayName: async (name) => {
-      try { await updateDisplayName(name); }
+      try { await priv.presence.updateDisplayName(name); }
       catch (err) { toast(friendlyError(err, 'Could not save display name.'), { type: 'error' }); throw err; }
     },
     onLogout: handleLogout,
     getDisplayName: myName,
     // Settings UI is bound once per page load, so read the *current* session lazily.
     getEmail: () => session?.user.email || '',
-    turnStatus: () => (hasTurnConfigured() ? 'Configured' : 'Not configured — STUN only (some networks will fail)'),
+    turnStatus: () => (webrtc.hasTurnConfigured() ? 'Configured' : 'Not configured — STUN only (some networks will fail)'),
     version: APP_VERSION,
     onNotificationsToggle: handleNotificationsToggle,
     onTestNotification: () => notifyPrivate('m', { force: true }),
@@ -180,11 +236,11 @@ async function startSession(user) {
     pushStatus,
   });
 
-  initChat({
+  chat.initChat({
     myUid: user.uid, peerUid, getPeerName: peerName,
     myLastReadAt: toDate(previous?.lastReadAt), myClearedAt: latestMarker(s, 'clearedAt'),
   });
-  initCalls({
+  calls.initCalls({
     myUid: user.uid, peerUid, getPeerName: peerName,
     previousLastActive: previous?.lastActive || null, myCallsClearedAt: latestMarker(s, 'callsClearedAt'),
   });
@@ -194,16 +250,17 @@ async function startSession(user) {
 
   // "online" ages out without any new snapshot, so re-evaluate periodically.
   s.timers.push(setInterval(renderPeer, PRESENCE_REFRESH_MS));
-  s.timers.push(setInterval(refreshRelativeLabels, 60_000));
+  s.timers.push(setInterval(chat.refreshRelativeLabels, 60_000));
 
   renderMe();
   renderPeer();
   showScreen('app');
   if (mobileQuery.matches) showChat(false);
-  else setChatShown(true);
+  else chat.setChatShown(true);
 }
 
-function teardownSession() {
+/** `otherTabActive`: another tab of this browser took over, so it is still in use. */
+function teardownSession({ otherTabActive = false } = {}) {
   if (!session) return;
   const s = session;
   session = null;
@@ -211,48 +268,60 @@ function teardownSession() {
   s.timers.forEach(clearInterval);
   // Stop the heartbeat and the "in use" marker too: the sign-in may have ended without
   // a reload (e.g. revoked after a password reset). Logout marks offline itself.
-  stopPresence({ markOffline: false });
-  stopAliveMarker();
-  destroyCalls();
-  destroyChat();
+  if (priv) {
+    priv.presence.stopPresence({ markOffline: false });
+    priv.calls.destroyCalls();
+    priv.chat.destroyChat();
+  }
+  stopAliveMarker({ forget: !otherTabActive });
   resetNotifications();
   closeModal('settings-modal');
+  s.releaseTab?.();
+}
+
+/** Another tab of this browser pressed "Use here": stop everything here and show the cover. */
+function lostTab(s) {
+  if (session !== s) return;
+  teardownSession({ otherTabActive: true });
+  showScreen('cover');
 }
 
 /**
  * A newer sign-in on another device took over this account. The server already
  * refuses this session's requests; end any call, sign out and reload so no copy of
- * the conversation stays in memory, then show the notice on the login screen.
+ * the conversation stays in memory, then show the notice on the sign-in screen.
  */
 async function endSuperseded(s) {
   if (session !== s) return;
-  if (isInCall()) hangUp();
+  if (priv?.calls.isInCall()) priv.calls.hangUp();
   teardownSession();
-  stopAliveMarker();
   rememberSuperseded();
   await logout().catch(() => {});
-  location.reload();
+  location.replace(homeUrl());
 }
 
 async function handleLogout() {
+  const inCall = priv?.calls.isInCall();
   const ok = await confirmDialog({
     title: 'Log out?',
-    text: isInCall() ? 'Your current call will end.' : 'You will need your password to sign in again.',
+    text: inCall ? 'Your current call will end.' : 'You will need your password to sign in again.',
     okLabel: 'Log out',
   });
   if (!ok) return;
-  if (isInCall()) hangUp();
+  if (priv?.calls.isInCall()) priv.calls.hangUp();
   closeModal('settings-modal');
   const uid = session?.user.uid;
   // While still authenticated (the rules reject writes after sign-out): stop push to
   // this device and mark offline.
   await disablePush(uid).catch(() => {});
-  await stopPresence();
+  await priv?.presence.stopPresence();
   stopAliveMarker();
   try {
     await logout();
-    // Reload so nothing from the conversation stays in this page's memory.
-    location.reload();
+    if (uid) announceLogout(uid);
+    // Reload so nothing from the conversation stays in this page's memory; the page
+    // starts again on the homepage.
+    location.replace(homeUrl());
   } catch (err) {
     toast(friendlyError(err, 'Could not sign out.'), { type: 'error' });
   }
@@ -300,8 +369,8 @@ function latestMarker(s, field) {
 }
 
 function applyMarkers(s) {
-  setClearedAt(latestMarker(s, 'clearedAt'));
-  setCallsClearedAt(latestMarker(s, 'callsClearedAt'));
+  priv.chat.setClearedAt(latestMarker(s, 'clearedAt'));
+  priv.calls.setCallsClearedAt(latestMarker(s, 'callsClearedAt'));
 }
 
 /** A "delete for everyone" by either person: reload the conversation view. */
@@ -309,11 +378,12 @@ function noteWipe(s, who, data) {
   const t = data?.wipedAt?.toMillis?.() ?? 0;
   const prev = s.wipe[who];
   s.wipe[who] = t;
-  if (prev !== undefined && t > prev) reloadChat();
+  if (prev !== undefined && t > prev) priv.chat.reloadChat();
 }
 
 async function handleClearHistory() {
   if (!session) return;
+  const { chat, calls } = priv;
   const choice = await choiceDialog({
     title: 'Clear all chat history?',
     text: 'Delete for me: all messages and call history disappear from your view, on every device you sign in to. The other person keeps theirs.\n\nDelete for everyone: all messages and finished calls are permanently erased for both of you. This cannot be undone.',
@@ -323,12 +393,12 @@ async function handleClearHistory() {
     ],
   });
   if (choice === 'me') {
-    await runDeletion(() => clearMessagesForMe(['callsClearedAt']), 'Chat history deleted for you.');
+    await chat.runDeletion(() => chat.clearMessagesForMe(['callsClearedAt']), 'Chat history deleted for you.');
   } else if (choice === 'everyone') {
-    await runDeletion(async () => {
+    await chat.runDeletion(async () => {
       // Messages first: if erasing call history fails, the messages are still gone.
-      await eraseMessagesForEveryone();
-      await eraseCallHistory();
+      await chat.eraseMessagesForEveryone();
+      await calls.eraseCallHistory();
     }, 'Chat history deleted for everyone.');
   }
 }
@@ -343,8 +413,9 @@ function renderMe() {
 
 function renderPeer() {
   if (!session) return;
+  const { presence, chat, calls } = priv;
   const name = peerName();
-  const { online, typing, lastActive } = describePresence(session.peerData);
+  const { online, typing, lastActive } = presence.describePresence(session.peerData);
 
   for (const id of ['peer-name', 'contact-name']) $(id).textContent = name;
   for (const id of ['peer-avatar', 'contact-avatar']) paintAvatar($(id), name, session.peerUid);
@@ -355,13 +426,13 @@ function renderPeer() {
   status.classList.toggle('typing', typing);
   status.textContent = typing ? 'typing…'
     : online ? 'online'
-    : lastActive ? formatLastSeen(lastActive)
+    : lastActive ? formatLastSeen(lastActive, presence.serverNow())
     : session.peerData ? 'offline' : 'has not signed in yet';
   status.title = 'Presence is based on a once-a-minute heartbeat, so “online” can lag by up to ~2 minutes after the other person leaves.';
 
-  setPeerTyping(typing);
-  setSidebarTyping(typing);
-  refreshCallPeer();
+  chat.setPeerTyping(typing);
+  chat.setSidebarTyping(typing);
+  calls.refreshCallPeer();
 }
 
 /* ---------- Mobile navigation ---------- */
@@ -369,14 +440,14 @@ function renderPeer() {
 function showChat(pushHistory = true) {
   $('app-screen').classList.add('show-chat');
   $('contact-item').classList.add('active');
-  setChatShown(true);
+  priv?.chat.setChatShown(true);
   if (pushHistory && mobileQuery.matches && !history.state?.chat) history.pushState({ chat: true }, '');
 }
 
 function showSidebar() {
   $('app-screen').classList.remove('show-chat');
   $('contact-item').classList.remove('active');
-  setChatShown(!mobileQuery.matches);
+  priv?.chat.setChatShown(!mobileQuery.matches);
 }
 
 function bindGlobal() {
@@ -395,10 +466,10 @@ function bindGlobal() {
     if (mobileQuery.matches && $('app-screen').classList.contains('show-chat')) showSidebar();
   });
   mobileQuery.addEventListener?.('change', (e) => {
-    if (!e.matches) { $('app-screen').classList.add('show-chat'); setChatShown(true); }
+    if (!e.matches) { $('app-screen').classList.add('show-chat'); priv?.chat.setChatShown(true); }
   });
 
-  const attention = () => onChatAttention();
+  const attention = () => priv?.chat.onChatAttention();
   window.addEventListener('focus', attention);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') attention(); });
 
@@ -414,6 +485,6 @@ function bindGlobal() {
 main().catch((err) => {
   console.error('Startup failed', err?.message || err);
   document.querySelector('#boot-screen .spinner').hidden = true;
-  setBootMessage('PrivateChat failed to start. Check your connection and reload the page.');
+  setBootMessage('Something went wrong. Please reload the page.');
   showScreen('boot');
 });

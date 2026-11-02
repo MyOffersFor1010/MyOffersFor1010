@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="description" content="A My Offers chat, audio and video calling space for two." />
+  <meta name="description" content="Daily deals, coupons and offers." />
   <meta name="theme-color" content="#5b5ef0" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <meta http-equiv="Content-Security-Policy"
@@ -72,12 +72,20 @@
     <symbol id="i-volume" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></g></symbol>
   </svg>
 
-  <!-- ============ Boot / auth verification screen ============ -->
+  <!-- ============ Splash (start-up and session check) ============ -->
   <div id="boot-screen" class="boot-screen" role="status" aria-live="polite">
-    <div class="boot-logo"><svg><use href="#i-logo"/></svg></div>
+    <div class="boot-logo"><img src="assets/icons/app-icon.svg" alt="" width="64" height="64" /></div>
     <div class="spinner" aria-hidden="true"></div>
-    <p id="boot-message">Verifying your session…</p>
+    <p id="boot-message">Loading…</p>
   </div>
+
+  <!-- ============ Shown in a second tab/window while the app is in use in another one ============ -->
+  <section id="cover-screen" class="boot-screen" hidden aria-labelledby="cover-title">
+    <img src="assets/icons/app-icon.svg" alt="" width="64" height="64" />
+    <h1 id="cover-title" class="cover-title">My Offers</h1>
+    <p>My Offers is open in another tab or window.</p>
+    <button id="cover-use" class="btn btn-primary" type="button">Use here</button>
+  </section>
 
   <!-- ============ Login screen ============ -->
   <section id="login-screen" class="login-screen" hidden aria-labelledby="login-title">
@@ -86,10 +94,10 @@
     </div>
     <div class="login-card">
       <div class="login-brand">
-        <div class="brand-mark"><svg><use href="#i-logo"/></svg></div>
+        <img class="brand-logo" src="assets/icons/app-icon.svg" alt="" width="54" height="54" />
         <div>
           <h1 id="login-title">My Offers</h1>
-          <p class="muted">A My Offers space for exactly two people.</p>
+          <p class="muted">Sign in to see your saved offers.</p>
         </div>
       </div>
 
@@ -115,18 +123,19 @@
         <button id="forgot-password" type="button" class="link-btn">Forgot password?</button>
       </form>
 
-      <p class="login-footnote"><svg><use href="#i-lock"/></svg> No sign-ups. Access is limited to two authorized accounts.</p>
+      <button id="login-back" type="button" class="link-btn login-back">Back to offers</button>
       <button id="install-btn-login" class="btn btn-secondary btn-block install-btn" type="button" hidden>
         <svg><use href="#i-download"/></svg> Install App
       </button>
     </div>
   </section>
 
-  <!-- ============ Decoy offers page (shown after a wrong login; generic, no real brand) ============ -->
-  <section id="decoy-screen" class="decoy" hidden aria-labelledby="decoy-title">
+  <!-- ============ Public homepage (generic offers page, no real brand) ============ -->
+  <section id="home-screen" class="decoy" hidden aria-labelledby="home-title">
     <header class="decoy-header">
       <img src="assets/icons/app-icon.svg" alt="" width="32" height="32" />
-      <h1 id="decoy-title">My Offers</h1>
+      <h1 id="home-title">My Offers</h1>
+      <button id="home-signin" class="decoy-header-btn" type="button">Sign in</button>
     </header>
     <div class="decoy-search"><input type="search" placeholder="Search offers" aria-label="Search offers" readonly /></div>
     <nav class="decoy-chips" aria-label="Categories">
@@ -147,7 +156,39 @@
       <li class="decoy-card"><div class="decoy-img" style="--tone:#ffeede">💄</div><h3>Matte Lipstick Combo (Pack of 3)</h3><p><b>₹249</b> <s>₹600</s> <em>59% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
       <li class="decoy-card"><div class="decoy-img" style="--tone:#eef6e0">🧸</div><h3>Soft Teddy Bear, 2 ft</h3><p><b>₹349</b> <s>₹899</s> <em>61% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
     </ul>
-    <p class="decoy-foot">Sample offers. Prices and availability may change.</p>
+    <p class="decoy-foot">Prices and availability may change.</p>
+  </section>
+
+  <!-- ============ Member page (shown after any unsuccessful sign-in; static, loads no data) ============ -->
+  <section id="decoy-screen" class="decoy" hidden aria-labelledby="decoy-title">
+    <header class="decoy-header">
+      <img src="assets/icons/app-icon.svg" alt="" width="32" height="32" />
+      <h1 id="decoy-title">My Offers</h1>
+      <button id="decoy-signout" class="decoy-header-btn" type="button">Sign out</button>
+    </header>
+    <div class="decoy-welcome">
+      <h2>Welcome back!</h2>
+      <p>Here are your rewards and saved offers.</p>
+    </div>
+    <div class="decoy-points">
+      <div><span>Reward points</span><strong>1,240</strong></div>
+      <div><span>Membership</span><strong>Silver</strong></div>
+      <div><span>Coupons</span><strong>3 active</strong></div>
+    </div>
+    <h2 class="decoy-section">Saved offers</h2>
+    <ul class="decoy-grid">
+      <li class="decoy-card"><div class="decoy-img" style="--tone:#e6f0ff">🎧</div><h3>Wireless Bluetooth Earbuds</h3><p><b>₹799</b> <s>₹2,499</s> <em>68% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
+      <li class="decoy-card"><div class="decoy-img" style="--tone:#e4f6f8">⌚</div><h3>Smart Fitness Watch</h3><p><b>₹1,099</b> <s>₹3,999</s> <em>73% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
+      <li class="decoy-card"><div class="decoy-img" style="--tone:#f0eaff">🛏️</div><h3>Double Bedsheet with 2 Pillow Covers</h3><p><b>₹379</b> <s>₹999</s> <em>62% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
+      <li class="decoy-card"><div class="decoy-img" style="--tone:#fff4dc">🫙</div><h3>Kitchen Storage Jars (Set of 6)</h3><p><b>₹299</b> <s>₹699</s> <em>57% off</em></p><button class="decoy-offer-btn" type="button">View offer</button></li>
+    </ul>
+    <h2 class="decoy-section">Recent orders</h2>
+    <ul class="decoy-orders">
+      <li><span>Order #48213 · Kitchen Storage Jars</span><em>Delivered</em></li>
+      <li><span>Order #47956 · Men’s Running Shoes</span><em>Delivered</em></li>
+      <li><span>Order #47102 · Matte Lipstick Combo</span><em>Returned</em></li>
+    </ul>
+    <p class="decoy-foot">Prices and availability may change.</p>
   </section>
 
   <!-- ============ Main application ============ -->
@@ -196,10 +237,6 @@
       <div class="sidebar-section-title">Recent calls</div>
       <ul id="call-history" class="call-history" aria-live="polite"></ul>
       <p id="call-history-empty" class="sidebar-empty muted small" hidden>No calls yet.</p>
-
-      <footer class="sidebar-footer muted small">
-        <svg><use href="#i-lock"/></svg> Access restricted to two accounts
-      </footer>
     </aside>
 
     <!-- Chat panel -->
@@ -232,7 +269,7 @@
         <div id="messages-empty" class="messages-empty" hidden>
           <div class="empty-illustration"><svg><use href="#i-logo"/></svg></div>
           <h2>Say hello 👋</h2>
-          <p class="muted">This conversation is Offers between the two of you. Send the first message.</p>
+          <p class="muted">No messages yet. Send the first message.</p>
         </div>
         <div id="messages-error" class="messages-error" hidden role="alert">
           <svg><use href="#i-alert"/></svg>
@@ -352,7 +389,7 @@
           <h3>Notifications</h3>
           <label class="switch-row"><span>Message sounds</span><input type="checkbox" id="pref-message-sound" class="switch" /></label>
           <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
-          <label class="switch-row"><span>My Offers notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
+          <label class="switch-row"><span>Notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
           <p id="notify-permission-note" class="muted small"></p>
           <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one just dismisses it; open the app yourself to see what happened.</p>
           <p id="push-note" class="muted small"></p>
@@ -382,7 +419,7 @@
           <label class="field" id="speaker-field"><span>Speaker</span><select id="pref-speaker"></select></label>
           <button id="refresh-devices" class="btn btn-secondary" type="button">Detect devices</button>
           <p class="muted small" id="devices-note">Device names appear after you grant camera/microphone permission once.</p>
-          <p class="muted small">My offers call audio: browsers cannot force the phone earpiece or block the loudspeaker, and on many phones call audio plays on the loudspeaker unless headphones are connected. Use wired or Bluetooth headphones for private calls. The app never switches to the loudspeaker itself.</p>
+          <p class="muted small">Call audio: browsers cannot force the phone earpiece or block the loudspeaker, and on many phones call audio plays on the loudspeaker unless headphones are connected. Use wired or Bluetooth headphones for private calls. The app never switches to the loudspeaker itself.</p>
         </section>
 
         <section class="settings-group">
@@ -401,8 +438,6 @@
           <h3>About</h3>
           <dl class="about-list">
             <dt>Application</dt><dd>My Offers <span id="app-version"></span></dd>
-            <dt>Messaging</dt><dd>Cloud Firestore (real-time)</dd>
-            <dt>Calls</dt><dd>WebRTC peer-to-peer, encrypted with DTLS-SRTP</dd>
             <dt>Relay (TURN)</dt><dd id="turn-status">—</dd>
           </dl>
         </section>

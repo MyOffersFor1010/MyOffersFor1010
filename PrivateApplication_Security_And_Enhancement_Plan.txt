@@ -1,0 +1,1527 @@
+================================================================================
+     PRIVATE APPLICATION - SECURITY, DISGUISED UI, NOTIFICATIONS & PHOTO SHARING
+                        IMPLEMENTATION PLAN (FOR REVIEW / APPROVAL)
+================================================================================
+
+Project         : C:\Aniket Mandage\MyOffers  (git remote github.com/asmandage/PrivateChat)
+Code baseline   : branch main @ ee705ce, app version 2.2.0
+Plan date       : 2026-11-02
+Input documents : ChatApplication_Complete_Project_Audit.txt + full source tree
+Status          : PLAN ONLY. No source file, rule, configuration, credential or
+                  deployment was changed. Nothing was uploaded to Firebase.
+
+CONVENTIONS
+  - "VERIFIED"      = checked in the source code or with a read-only request in this pass.
+  - "NOT VERIFIED"  = needs Firebase / Google Cloud / GitHub console access or a real device.
+  - "DECISION D-x"  = a choice you must make before implementation (list in Section 0.3).
+  - Change IDs (A-01, C-03, ...) are referenced across sections.
+  - Secrets / identifiers are redacted. No credential appears in this document.
+  - "the other user" is used instead of names or pronouns.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+   0. Summary, verification of audit findings, decisions required
+   1. Existing architecture summary
+   2. Existing functionality
+   3. Current security findings (re-verified)
+   4. Disguised login and decoy dashboard requirements
+   5. Visible text and metadata that need attention
+   6. Notification system improvements
+   7. Notification click behaviour
+   8. End-to-end encryption architecture
+   9. Photo upload architecture
+  10. Firebase Storage integration requirements
+  11. Database and security-rule changes
+  12. Exact files that need modification
+  13. Implementation dependencies
+  14. Risk assessment
+  15. Testing plan
+  16. Prioritized implementation phases
+  17. Appendix - What can and cannot be hidden (honest limits)
+
+
+================================================================================
+0. SUMMARY, VERIFICATION OF AUDIT FINDINGS, DECISIONS REQUIRED
+================================================================================
+
+0.1 Short summary
+--------------------------------------------------------------------------------
+Everything requested is feasible within the existing vanilla-JS + Firebase design,
+with no framework and no new runtime dependency (all cryptography can use the
+browser's built-in Web Crypto API; Firebase Storage uses the same pinned Firebase
+SDK 10.12.2 from gstatic). The work splits into seven phases (Section 16):
+
+  Phase 0  Preparation and decisions (console work, backups, Blaze plan)
+  Phase 1  Disguise: public homepage, member-style decoy, neutral text, repo/hosting
+  Phase 2  Reliable private notifications + safe notification click
+  Phase 3  Security hardening (App Check, MFA, headers, sessions, backups)
+  Phase 4  End-to-end encryption of text messages (+ migration of old messages)
+  Phase 5  Encrypted photo sharing via Firebase Storage
+  Phase 6  Finalisation (encrypted-only rules, removal of legacy paths, docs)
+
+Notifications are your top priority and depend mostly on configuration. The single
+largest blocker is that FCM_VAPID_KEY is empty in production (verified below), so
+background push has never been able to work.
+
+0.2 Re-verification of the audit findings (this pass)
+--------------------------------------------------------------------------------
+  +----------------------------------------+----------+-------------------------------------+
+  | Audit finding                          | Still    | How verified                        |
+  |                                        | accurate?|                                     |
+  +----------------------------------------+----------+-------------------------------------+
+  | Plaintext messages                     | YES      | js/chat.js writeMessage() writes     |
+  |                                        |          | { text }; rules require 'text'.     |
+  | Password-only authentication           | YES      | js/auth.js signInWithEmailAndPassword|
+  |                                        |          | only; no MFA code paths.            |
+  | Either member may delete any message   | YES      | firestore.rules messages:           |
+  |                                        |          | "allow delete: if isActive() ..."   |
+  | App Check disabled                     | YES      | APP_CHECK_SITE_KEY = '' locally AND |
+  |                                        |          | on the live site.                   |
+  | Missing FCM VAPID key                  | YES      | FCM_VAPID_KEY = '' locally AND on   |
+  |                                        |          | the live site.                      |
+  | Public repository exposure             | YES      | github.com/asmandage/PrivateChat    |
+  |                                        |          | returns HTTP 200 without login, so  |
+  |                                        |          | it is PUBLIC.                       |
+  | Internals served with the site         | YES      | .../PrivateChat/README.md,          |
+  |                                        |          | firestore.rules, functions/index.js |
+  |                                        |          | all return HTTP 200 on GitHub Pages.|
+  | Firebase Storage not integrated        | YES      | No Storage import, no storage.rules,|
+  |                                        |          | firebase.json has no storage block. |
+  | Live site == repository                | YES      | index.html, sw.js, js/auth.js,      |
+  |                                        |          | js/chat.js, js/firebase-config.js   |
+  |                                        |          | identical to HEAD (line endings     |
+  |                                        |          | ignored).                           |
+  +----------------------------------------+----------+-------------------------------------+
+  Still NOT VERIFIED: deployed Firestore rules, deployed Cloud Functions, Blaze plan,
+  Auth console settings, API-key restrictions, Storage bucket existence, backups.
+
+  NEW findings from this pass (not in the audit):
+   N-1  Root cause of the notification-click complaint: sw.js 'notificationclick'
+        only calls event.notification.close(). It never focuses or opens the app.
+        The in-page fallback (new Notification(...) in js/notifications.js) has no
+        click handler at all. This was a deliberate "tap = dismiss" design.
+   N-2  Duplicated browser tab = two simultaneously active sessions on one device.
+        Chrome/Edge copy sessionStorage when a tab is duplicated, so the duplicate
+        restores the same Firebase sign-in with the SAME auth_time. The
+        single-session check (auth_time equality) cannot distinguish them, and the
+        restore guard passes because the "alive" marker is fresh.
+   N-3  The GitHub Pages URL itself contains "PrivateChat" (/PrivateChat/). It is
+        visible in the address bar, browser history, and - for notifications from a
+        non-installed browser tab on Android - in the notification header origin.
+   N-4  The Firebase project ID starts with "privatechat-". It appears in the
+        public config file, in every Firestore/Auth network request, in the
+        authDomain and in the Storage bucket name. A project ID can NEVER be renamed.
+   N-5  github.io origin is shared by all of your GitHub Pages project sites
+        (asmandage.github.io/*). localStorage and IndexedDB of this app are
+        readable by any other page you publish on that origin.
+   N-6  Every message push triggers renotify:true, so a burst of messages makes the
+        phone alert once per message (sound/vibration each time).
+   N-7  Pre-login error texts can reveal internals: e.g. "Check the UID allowlist in
+        firestore.rules" (js/ui.js friendlyError), "Setup required ... two authorized
+        UIDs" and "PrivateChat failed to start" (js/app.js), "This account is not
+        authorized to use this app." (js/auth.js).
+
+0.3 Decisions required before implementation
+--------------------------------------------------------------------------------
+  D-1  Hosting / repository strategy (Section 5.5)
+       a) Private source repo + Firebase Hosting on a neutral custom domain
+          (RECOMMENDED: real security headers, no internals published).
+       b) Private source repo + separate public "web-only" repo on GitHub Pages.
+       c) Keep the current public repo (not recommended).
+  D-2  Firebase project ID containing "privatechat-": accept (RECOMMENDED for now;
+       visible only on technical inspection) or migrate to a new neutral project
+       (large effort, Section 5.6).
+  D-3  Notification tap when the app is ALREADY open and signed in:
+       a) Show a neutral "privacy cover" (homepage look) that needs an unlock
+          (RECOMMENDED; matches "must not open the chat directly").
+       b) Just focus the existing window as it is.
+  D-4  Push delivery model:
+       a) Session-bound (current): only devices of the newest login receive pushes;
+          logging in on a laptop silences the phone.
+       b) Device-bound (RECOMMENDED): every device where the user enabled
+          notifications keeps receiving content-free pushes until removed in
+          Settings or until logout. Payload is content-free, so the risk is low.
+       Also: should LOGOUT stop notifications on that device? (current: yes)
+  D-5  "Delete conversation for everyone" by either member: keep, restrict to own
+       messages, or keep with backups only.
+  D-6  E2EE key protection: separate encryption passphrase (RECOMMENDED, required)
+       + printed recovery code (RECOMMENDED) + optional "remember this device".
+  D-7  Existing plaintext history: re-encrypt by each sender (RECOMMENDED), keep as
+       "legacy unencrypted", or erase.
+  D-8  Photo limits: max processed size (RECOMMENDED 5 MB), max photos per send
+       (RECOMMENDED 10), output format (RECOMMENDED JPEG, PNG kept when transparent),
+       allow "Save to device" in the viewer (default OFF - it writes a plaintext
+       file).
+  D-9  MFA: enable TOTP (authenticator app) via Identity Platform (RECOMMENDED) or
+       stay password-only.
+  D-10 Remove the secret "tap the title 5 times" decoy exit and replace it with an
+       ordinary "Sign out" link (RECOMMENDED - a normal app has one, and no secret
+       mechanism has to be kept hidden).
+
+
+================================================================================
+1. EXISTING ARCHITECTURE SUMMARY
+================================================================================
+
+  Client  : One static page (index.html) + 18 ES modules in js/ + 4 CSS files.
+            No framework, no build. Firebase JS SDK 10.12.2 from www.gstatic.com.
+  PWA     : manifest.json ("My Offers"), sw.js (network-first shell cache, push
+            display, notification click = dismiss only).
+  Auth    : Firebase Authentication, email/password, browserSessionPersistence
+            (sessionStorage). Two allowlisted UIDs. Single active session enforced by
+            firestore.rules (sessions/{uid}.authTime == token auth_time).
+  Data    : Cloud Firestore with memory-only cache. Collections: sessions, users
+            (+private/markers, hiddenMessages, pushTokens), conversations/main/
+            messages, calls (+callerCandidates, calleeCandidates).
+  Server  : functions/index.js - 3 Firestore-triggered Cloud Functions (v2, Node 22,
+            us-central1) that send data-only FCM pushes { k: 'm'|'a'|'v'|'mc' }.
+            Deployment NOT VERIFIED.
+  Calls   : WebRTC with Firestore signalling, Google STUN only.
+  Hosting : GitHub Pages, https://asmandage.github.io/PrivateChat/ (VERIFIED live).
+
+  Boot flow today (js/app.js main()):
+    boot spinner "Verifying your session..." -> watchAuth()
+      no user  -> login screen ("My Offers", subtitle reveals two-person purpose)
+      user     -> startSession(): claimSession -> startPresence -> listeners ->
+                  initChat/initCalls -> app screen
+    wrong credentials -> decoy deals page (js/decoy.js), exit by reload or 5 taps.
+
+
+================================================================================
+2. EXISTING FUNCTIONALITY (to be preserved)
+================================================================================
+  +--------------------------------------+-------------------------------------------+
+  | Feature                              | Implementation (must keep working)        |
+  +--------------------------------------+-------------------------------------------+
+  | Login, password reset, logout        | js/auth.js, js/app.js handleLogout()      |
+  | Single active session                | js/session.js, firestore.rules isActive() |
+  | Session-only sign-in + restore guard | js/firebase.js, js/session.js             |
+  | Real-time 1:1 messaging              | js/chat.js subscribeLive(), sendMessage() |
+  | History pagination                   | js/chat.js loadOlder()                    |
+  | Delivered / read receipts            | js/presence.js markDelivered/markRead     |
+  | Typing indicator                     | js/presence.js notifyTyping()             |
+  | Online / last seen                   | js/presence.js heartbeat                  |
+  | Delete for me / for everyone         | js/chat.js, js/calls.js, js/app.js        |
+  | Audio / video calls                  | js/calls.js, js/webrtc.js                 |
+  | Coded notifications (in-page)        | js/notifications.js, js/notify-config.js  |
+  | Background push (code only)          | js/push.js, sw.js, functions/index.js     |
+  | PWA install                          | js/pwa.js, manifest.json, sw.js           |
+  | Settings                             | js/settings.js                            |
+  | Decoy page                           | js/decoy.js                               |
+  +--------------------------------------+-------------------------------------------+
+  Preservation rules applied in this plan: no framework, no backend change, no file
+  renames, minimal targeted edits, backward-compatible rule changes deployed BEFORE
+  the client, existing data readable throughout every migration.
+
+
+================================================================================
+3. CURRENT SECURITY FINDINGS (RE-VERIFIED)
+================================================================================
+  +------+------------------------------------------------------+--------+----------+
+  | ID   | Finding                                              | Risk   | Fixed by |
+  +------+------------------------------------------------------+--------+----------+
+  | S-01 | Messages stored in plaintext                         | High   | Phase 4  |
+  | S-02 | Password-only authentication                         | High   | F-02     |
+  | S-03 | Either member can permanently erase all messages     | High   | F-04/D-5 |
+  | S-04 | App Check disabled                                   | Medium | F-01     |
+  | S-05 | Auth / API-key console hardening not verified        | Medium | F-03     |
+  | S-06 | Public repo; README/rules/functions served publicly  | Medium | B-05/D-1 |
+  | S-07 | P2P calls expose IP addresses (no TURN)              | Medium | F-12     |
+  | S-08 | Call signalling (SDP) not authenticated              | Medium | D-10     |
+  | S-09 | CSP only as <meta>; broad connect-src                | Medium | F-06     |
+  | S-10 | Login page/meta text reveals purpose                 | Medium | B-01     |
+  | S-11 | No rate limiting                                     | Medium | F-05     |
+  | N-2  | Duplicated tab => two active sessions                | Low    | A-07     |
+  | N-3  | URL path "/PrivateChat/"                             | Medium | B-05     |
+  | N-4  | Project ID "privatechat-..." in requests             | Low    | D-2      |
+  | N-5  | Shared github.io origin storage                      | Low    | B-05     |
+  | N-7  | Pre-login errors reveal internals                    | Medium | A-06     |
+  | S-12 | Firebase session in sessionStorage                   | Low    | (XSS-free|
+  |      |                                                      |        | practice)|
+  | S-15 | Legacy cleared-markers readable by peer              | Low    | F-08     |
+  +------+------------------------------------------------------+--------+----------+
+  (Full descriptions: ChatApplication_Complete_Project_Audit.txt, Section 4.)
+
+
+================================================================================
+4. DISGUISED LOGIN AND DECOY DASHBOARD REQUIREMENTS
+================================================================================
+
+4.1 Target behaviour
+--------------------------------------------------------------------------------
+  Open site  ->  [Public homepage "My Offers"]  (ordinary deals site, "Sign in" button)
+                       |
+                 [Sign in sheet]  email + password
+                  /                        \
+     Firebase OK AND UID allowlisted     anything else (wrong password, unknown email,
+     AND session claimed                 disabled account, valid-but-unlisted account)
+          |                                         |
+   [Real app] (chat, presence, calls)      [Member dashboard decoy]
+                                            "Welcome back" - saved offers, points,
+                                            recent orders, normal "Sign out" link.
+                                            100% static. NO Firebase session, NO
+                                            Firestore access, NO private module run.
+
+  Ordinary errors stay ordinary (like any web shop):
+   - invalid email format     -> "Enter a valid email address."
+   - too many attempts        -> "Too many attempts. Try again later."
+   - network offline          -> "You're offline. Check your connection."
+  These do not reveal anything specific to this app. (Showing the decoy for
+  "too many attempts" is NOT recommended: the real user would then see the decoy
+  while typing the correct password, which is confusing.)
+
+4.2 Security invariants (must hold after implementation)
+--------------------------------------------------------------------------------
+  I-1  The decoy never calls Firebase, never creates or fakes a session, never
+       writes local storage that could later be mistaken for a sign-in.
+  I-2  startSession() (private services: presence, chat, calls, push, E2EE) runs
+       ONLY when: onAuthStateChanged reports a user, isAllowedUid(uid) is true,
+       claimSession() succeeded (server accepted the auth_time) and the restore
+       guard passed. This is already true today and must stay true.
+  I-3  Any failure inside startSession() returns to the PUBLIC HOMEPAGE (not a
+       technical error screen) and logs only an error code to the console.
+  I-4  Firestore/Storage rules remain the real boundary; the client allowlist is
+       cosmetic. The decoy is camouflage only.
+  I-5  No URL, query string or fragment ever changes what is shown. The app is a
+       single URL; state is never encoded in it.
+
+4.3 Lifecycle inspection results and planned handling
+--------------------------------------------------------------------------------
+  +------------------------+-------------------------------+-------------------------------+
+  | Situation              | Today (verified in code)      | Planned                       |
+  +------------------------+-------------------------------+-------------------------------+
+  | Login validation       | Empty fields -> error; wrong  | Same, but neutral copy; one   |
+  |                        | creds -> decoy; unlisted UID  | decoy path for all failure    |
+  |                        | -> race between decoy and     | kinds (A-04).                 |
+  |                        | "not authorized" text (B-06). |                               |
+  | Auth lifecycle         | watchAuth -> startSession /   | Unchanged core; add explicit  |
+  |                        | teardownSession.              | UI state machine: home, login,|
+  |                        |                               | decoy, splash, app, cover.    |
+  | Session restoration    | Reload within 10 min restores | Same policy; splash looks like|
+  | (reload)               | sign-in; boot screen shows    | the homepage loading; real app|
+  |                        | "Verifying your session...",  | shown only after I-2 holds.   |
+  |                        | "Loading your conversation..."|                               |
+  | Logout                 | confirm -> remove push token  | Same, then location.replace() |
+  |                        | -> offline -> signOut ->      | to the scope URL so the page  |
+  |                        | reload.                       | lands on the homepage.        |
+  | Browser refresh        | Restored if alive marker fresh| Same.                         |
+  | Back button            | Mobile chat uses pushState    | Decoy/login use pushState too |
+  |                        | ({chat:true}); decoy has no   | so Back returns to homepage   |
+  |                        | history entry (Back leaves the| instead of leaving the site.  |
+  |                        | site).                        | bfcache restore re-checks auth|
+  |                        |                               | (A-08).                       |
+  | Direct URL access      | Only one page; unknown paths  | Unchanged. Hosting rewrite of |
+  |                        | -> GitHub's 404 page.         | unknown paths to the homepage |
+  |                        |                               | if Firebase Hosting (D-1a).   |
+  | Tab duplication        | Duplicate becomes a 2nd active| BroadcastChannel tab lock:    |
+  |                        | session (N-2).                | the newer tab takes over, the |
+  |                        |                               | older one returns to homepage |
+  |                        |                               | (A-07).                       |
+  | Unauthorized account   | Signed out; decoy or login    | Always the decoy; no "not     |
+  |                        | error (race).                 | authorized" text anywhere.    |
+  +------------------------+-------------------------------+-------------------------------+
+
+4.4 Changes - disguise and login (Area A)
+--------------------------------------------------------------------------------
+A-01  Public homepage as the first screen
+  Existing file   : index.html (#boot-screen, #decoy-screen markup), js/ui.js
+                    showScreen(), js/app.js main(), css/style.css
+  Existing comp.  : boot screen + decoy deals page
+  Modification    : Turn the existing deals page into the public HOMEPAGE (same
+                    product grid) with a normal header "Sign in" button. main() shows
+                    it immediately instead of the spinner when there is no restored
+                    sign-in. showScreen() gains 'home' (and later 'cover').
+  Reason          : A casual visitor sees an ordinary site first.
+  Security        : No change to auth; homepage is static. Real-app DOM stays hidden.
+  Dependencies    : D-10.
+  Testing         : T-01, T-02, T-06.
+
+A-02  Sign-in sheet with neutral copy
+  Existing file   : index.html (#login-screen), js/auth.js initLoginForm()
+  Modification    : Keep the form/IDs; change texts (see Section 5); open from the
+                    homepage "Sign in" button; remove footnote "No sign-ups. Access is
+                    limited to two authorized accounts."
+  Reason          : Remove purpose-revealing text.
+  Security        : None negative.  Dependencies: A-01.  Testing: T-01..T-03.
+
+A-03  Member-dashboard decoy (Scenario B)
+  Existing file   : js/decoy.js showDecoy(), index.html, css/style.css
+  Modification    : New static "Welcome back" dashboard section (saved offers, a points
+                    card, "recent orders" list, offer grid) with a normal "Sign out"
+                    link back to the homepage (replaces the 5-tap exit, D-10). Does not
+                    echo the typed email. All interactions show harmless toasts.
+  Reason          : Requirement: wrong credentials look like a successful login to an
+                    ordinary app, with no hint of failure.
+  Security        : Static only (I-1). No Firebase call, no storage writes.
+  Dependencies    : D-10.  Testing: T-02, T-03, T-04.
+
+A-04  Single, race-free failure path
+  Existing file   : js/auth.js initLoginForm() submit handler, watchAuth()
+  Modification    : One module flag (e.g. decoyActive). watchAuth() for an unlisted
+                    user signs out silently and does NOT call showLoginError(); when
+                    the decoy is active, the auth "null" callback must not switch the
+                    screen back to login. Remove the text "This account is not
+                    authorized to use this app."
+  Reason          : Fixes audit bug B-06 (two competing screens).
+  Security        : Prevents leakage of "this app has an allowlist".
+  Testing         : T-03 (valid but unlisted Firebase account).
+
+A-05  Neutral splash during restore and startup failures
+  Existing file   : js/app.js main(), startSession(), main().catch(); index.html
+                    #boot-message
+  Modification    : Splash text "Loading..." (homepage styling). All startSession()
+                    failures (permission-denied, setup missing, unknown) -> homepage +
+                    neutral toast "Something went wrong. Please try again." Technical
+                    details only as console error CODES. "Setup required" message
+                    replaced by a neutral maintenance message.
+  Reason          : N-7, I-3.
+  Security        : Less information disclosure.  Testing: T-05, T-07.
+
+A-06  Split user-facing and developer error text
+  Existing file   : js/ui.js friendlyError()
+  Modification    : Keep the function signature; replace texts that mention
+                    firestore.rules, UID allowlist, Firestore index, README,
+                    js/firebase-config.js, Firebase Authentication with neutral ones.
+                    Keep the code (err.code) for console logging.
+  Reason          : N-7.  Security: less disclosure.  Testing: T-07 (unit test of
+                    the mapping).
+
+A-07  Duplicate-tab protection
+  Existing file   : js/session.js (new small helper), js/app.js startSession()/
+                    teardownSession()
+  Modification    : Each tab generates a random tab id; on startSession it announces
+                    itself on a BroadcastChannel; an older tab receiving the
+                    announcement for the same uid calls teardown and shows the
+                    homepage (same as "superseded" but without signing out the shared
+                    Firebase sign-in). Fallback where BroadcastChannel is missing:
+                    'storage' event on a localStorage key.
+  Reason          : N-2 (two live sessions with identical auth_time).
+  Security        : Limits exposure on a shared screen; server rule unchanged.
+  Dependencies    : None.  Testing: T-09.
+
+A-08  Back/forward cache and history
+  Existing file   : js/app.js bindGlobal(), showChat()/showSidebar(); js/decoy.js
+  Modification    : Listen for 'pageshow' with event.persisted === true: re-check
+                    auth.currentUser and the session document; if invalid, show the
+                    homepage. Decoy and sign-in sheet push a history state so the
+                    Back button returns to the homepage. Logout uses
+                    location.replace(<scope URL>).
+  Reason          : A page restored from bfcache must not show stale private content.
+  Testing         : T-08, T-10.
+
+A-09  (Optional) Load private modules only after authorization
+  Existing file   : js/app.js (static imports of chat.js, calls.js, presence.js,
+                    webrtc.js, push.js), sw.js SHELL list
+  Modification    : Convert those imports to dynamic import() inside startSession();
+                    remove them from the SW pre-cache list (they are cached on first
+                    authorized use instead).
+  Reason          : Before login, DevTools "Sources/Network" would show only the
+                    homepage files.
+  Security        : HONEST LIMIT - the files are still publicly downloadable by URL
+                    and the private DOM is still in index.html. This only reduces
+                    casual discovery. Offline start of the real app needs one prior
+                    online authorized visit.
+  Dependencies    : None.  Testing: T-06, T-11 (offline start), regression of calls.
+
+A-10  (Optional) Move the private app markup into a <template>
+  Existing file   : index.html (#app-screen, #incoming-call, #call-screen,
+                    #settings-modal), js/app.js
+  Modification    : Wrap private markup in <template id="private-app"> and clone it
+                    into the document in startSession(). All existing IDs unchanged.
+  Reason          : The inspector's Elements panel on the homepage shows no chat DOM.
+  Security        : Same honest limit as A-09 (view-source still shows the template).
+  Testing         : full regression (all getElementById lookups happen after clone).
+
+
+================================================================================
+5. VISIBLE TEXT AND METADATA THAT NEED ATTENTION
+================================================================================
+
+5.1 Visibility tiers
+--------------------------------------------------------------------------------
+  Tier 1 - Seen by anyone without signing in, or by the OS (MUST be neutral):
+           page title, meta tags, manifest, icons, homepage, sign-in, decoy, splash,
+           pre-login errors, notifications, app name in OS lists, URL.
+  Tier 2 - Seen only after correct sign-in (functional words like "message" and
+           "call" are acceptable; remove privacy/two-person emphasis).
+  Tier 3 - Seen only by technical inspection (source, DevTools, network, repo).
+           Can be reduced, NEVER fully hidden (Section 17).
+
+5.2 Tier 1 inventory (VERIFIED strings) and recommended replacements
+--------------------------------------------------------------------------------
+  +------------------------------+------------------------------------+-------------------------------+
+  | Location                     | Current text                       | Recommended                   |
+  +------------------------------+------------------------------------+-------------------------------+
+  | index.html <meta description>| "A My Offers chat, audio and video | "Daily deals, coupons and     |
+  |                              | calling space for two."            | offers."                      |
+  | index.html login subtitle    | "A My Offers space for exactly two | "Sign in to see your saved    |
+  |                              | people."                           | offers."                      |
+  | index.html login footnote    | "No sign-ups. Access is limited to | remove, or "New offers every  |
+  |                              | two authorized accounts."          | day."                         |
+  | index.html #boot-message     | "Verifying your session..."        | "Loading..."                  |
+  | index.html decoy footer      | "Sample offers. Prices and         | "Prices and availability may  |
+  |                              | availability may change."          | change." ("Sample" hints fake)|
+  | js/app.js bootText()         | "Loading your conversation..."     | "Loading..."                  |
+  | js/app.js main()             | "Setup required: ... two authorized| "Service temporarily          |
+  |                              | UIDs to js/firebase-config.js"     | unavailable."                 |
+  | js/app.js startSession()     | "...Publish the latest             | "Something went wrong. Please |
+  |                              | firestore.rules ... both UIDs..."  | try again."                   |
+  | js/app.js main().catch       | "PrivateChat failed to start..."   | "Something went wrong. Please |
+  |                              |                                    | reload the page."             |
+  | js/auth.js watchAuth()       | "This account is not authorized to | (removed - decoy instead)     |
+  |                              | use this app."                     |                               |
+  | js/ui.js friendlyError()     | 'permission-denied' -> "...UID     | neutral: "Something went      |
+  |                              | allowlist in firestore.rules"; also| wrong. Please try again."     |
+  |                              | index/README/config/Firebase texts |                               |
+  | <title>, manifest name/      | "My Offers", "Offers and updates." | OK - keep                     |
+  | short_name/description       |                                    |                               |
+  | Icons (assets/icons/*)       | generic price tag                  | OK - keep                     |
+  | Notification defaults        | "Special Offer Update" / "Your code| OK - keep (user-configurable) |
+  |                              | {code} is available"               |                               |
+  | Tab title                    | "My Offers", "(n) My Offers",      | OK                            |
+  |                              | "• · My Offers" while ringing      |                               |
+  | URL path                     | /PrivateChat/                      | neutral path/domain (B-05)    |
+  | Open Graph / Twitter meta    | none present                       | optional neutral og:title     |
+  |                              |                                    | "My Offers" for link previews |
+  +------------------------------+------------------------------------+-------------------------------+
+
+5.3 Tier 2 inventory (after sign-in)
+--------------------------------------------------------------------------------
+  +------------------------------+------------------------------------+-------------------------------+
+  | Location (index.html)        | Current text                       | Recommended                   |
+  +------------------------------+------------------------------------+-------------------------------+
+  | Sidebar footer               | "Access restricted to two accounts"| remove                        |
+  | Empty conversation           | "This conversation is Offers       | "No messages yet. Say hello." |
+  |                              | between the two of you."           |                               |
+  | Settings switch label        | "My Offers notifications"          | "Notifications"               |
+  | Settings devices note        | "My offers call audio: ..."        | "Call audio: ..."             |
+  | Settings About               | "Messaging: Cloud Firestore        | remove the two architecture   |
+  |                              | (real-time)", "Calls: WebRTC ..."  | rows (keep version, TURN)     |
+  | Sidebar "Chat"/"Recent calls"| functional                         | keep (Tier 2)                 |
+  +------------------------------+------------------------------------+-------------------------------+
+
+5.4 Tier 3 inventory (technical inspection) - VERIFIED occurrences
+--------------------------------------------------------------------------------
+  "PrivateChat"/"privatechat" occurs in: css/style.css, css/chat.css, css/calls.css,
+  css/responsive.css (header comments), js/app.js, js/pwa.js, js/firebase-config.js
+  (comments + project ID/authDomain/bucket), firestore.rules, functions/index.js,
+  functions/package.json ("privatechat-functions"), tests/*, README.md.
+  Browser-storage names visible in DevTools: localStorage privatechat.prefs,
+  privatechat.alive, privatechat.superseded (sessionStorage), privatechat.pushTokenId;
+  IndexedDB "privatechat-notify". Notification tags / push Topic "pc-m", "pc-c",
+  "pc-mc" (js/notify-config.js, sw.js, functions/index.js).
+
+  B-03  Rename storage keys, IndexedDB name, tags and Topic (with migration)
+    Existing files : js/settings.js (STORAGE_KEY), js/theme-boot.js, js/session.js
+                     (ALIVE_KEY, SUPERSEDED_KEY), js/push.js (TOKEN_ID_KEY),
+                     js/notify-config.js (DB_NAME, NOTIFY_TAGS), sw.js (readConfig DB
+                     name, TAGS), functions/index.js (Topic)
+    Modification   : Neutral names (e.g. "mo.prefs", "mo-config", tags "mo-1/2/3").
+                     One-time migration on start: read old key -> write new -> delete
+                     old. sw.js must read the NEW IndexedDB name (fallback to old once).
+    Reason         : DevTools on a shared device shows only neutral names.
+    Security       : None negative.  Testing: T-12 (upgrade keeps theme & codes).
+
+  B-04  Neutral comments in served files (optional)
+    Existing files : css/*.css headers, js/*.js header comments, sw.js
+    Modification   : Replace "PrivateChat" in comments with neutral wording. Do NOT
+                     rename modules (chat.js, calls.js) - the requirement forbids
+                     needless renames and it would not create secrecy anyway.
+    Reason/limit   : Cosmetic for Tier 3 only.
+
+5.5 Repository and deployment structure (B-05, DECISION D-1)
+--------------------------------------------------------------------------------
+  What the PUBLIC repository and site expose today (VERIFIED reachable):
+   - Project purpose and full architecture (README.md: "PrivateChat ... exactly two
+     people", data model, security model, decoy exit "tap the title 5 times").
+   - Firestore collection names and document fields (README, firestore.rules).
+   - Both authorized UIDs (firestore.rules, functions/index.js, firebase-config.js).
+   - Cloud Function names and logic (functions/index.js).
+   - Rules tests (tests/rules.test.mjs).
+   - Full git history (all previous versions, commit authors).
+
+  Recommended structure (D-1 option a):
+   1. Make the source repository PRIVATE (or create a new private repo without the
+      old history). NOTE: making it private does NOT erase copies already cloned,
+      forked, cached or archived; treat everything published so far as known.
+   2. Deploy with Firebase Hosting from the private repo (firebase deploy --only
+      hosting), publishing ONLY: index.html, manifest.json, sw.js, css/, js/,
+      assets/ (firebase.json "hosting.public" + "ignore" for README.md, functions/,
+      tests/, *.rules, firebase.json, .git*).
+   3. Connect a neutral CUSTOM DOMAIN. Do not use the default <projectId>.web.app /
+      firebaseapp.com domains because the project ID contains "privatechat-".
+   4. Use Hosting headers for a real CSP (incl. frame-ancestors 'none'), HSTS,
+      X-Content-Type-Options, Referrer-Policy, Permissions-Policy (F-06).
+   5. Add the new domain to Firebase Auth "Authorized domains" and the API-key
+      HTTP-referrer restriction.
+  Option b (keep GitHub Pages): a separate public repo with a neutral name that
+  contains only the web files, published by a GitHub Action from the private repo.
+  Still the shared github.io origin (N-5) and no real headers.
+
+  Migration consequences of ANY origin/path change (all options):
+   - Installed PWAs must be re-installed from the new URL.
+   - Notification permission must be granted again; push tokens re-registered.
+   - Local settings and notification codes are per-origin (re-enter once).
+   - The old GitHub Pages URL should be unpublished (it otherwise keeps serving
+     README/rules). GitHub does not redirect Pages URLs after a repo rename.
+
+5.6 Firebase project ID (DECISION D-2)
+--------------------------------------------------------------------------------
+  The ID "privatechat-..." cannot be renamed. It is visible in the served config,
+  in network requests (firestore.googleapis.com/.../projects/<id>/...), in the
+  authDomain and the Storage bucket name. Only a NEW Firebase project removes it:
+  export/import Firestore, import Auth users (password hashes can be migrated with
+  the Firebase CLI auth:export/auth:import, keeping UIDs), redeploy rules/functions,
+  re-create VAPID/App Check keys. RECOMMENDATION: accept for now (Tier 3 only); if
+  you migrate, do it BEFORE Phase 4/5 so encrypted data and Storage objects are
+  created only once.
+
+
+================================================================================
+6. NOTIFICATION SYSTEM IMPROVEMENTS
+================================================================================
+
+6.1 Current state (VERIFIED)
+--------------------------------------------------------------------------------
+  - In-page notifications only (page open but hidden, toggle on, permission granted).
+  - Background push impossible: FCM_VAPID_KEY = '' (local and live).
+  - Cloud Functions written but deployment NOT VERIFIED.
+  - Payload already content-free: data { k }, Topic "pc-<k>", TTL, Urgency high.
+  - SW suppresses a push while any window is VISIBLE (except Safari/iOS).
+  - Tap = dismiss only (Section 7).
+
+6.2 Requirement-by-requirement plan
+--------------------------------------------------------------------------------
+  +-------------------------------------------+---------------------------------------+
+  | Requirement                               | Plan                                  |
+  +-------------------------------------------+---------------------------------------+
+  | 1/2 Each user notified on the other's msg | Already designed: notifyNewMessage    |
+  |                                           | pushes to otherOf(senderId). Needs    |
+  |                                           | C-01 + C-02.                          |
+  | 3 App in background                       | FCM push (C-01/C-02); in-page path    |
+  |                                           | remains as fallback.                  |
+  | 4 Browser closed                          | FCM push. Android: works if Chrome/PWA|
+  |                                           | not force-stopped. Desktop: browser   |
+  |                                           | process must be running. iOS: Home    |
+  |                                           | Screen app only, iOS 16.4+.           |
+  | 5 No duplicates                           | C-07 (focus-aware suppression, single |
+  |                                           | path per device, tag/Topic collapse,  |
+  |                                           | burst throttle).                      |
+  | 6 Expired/refreshed tokens                | C-05.                                 |
+  | 7 Permission denial                       | C-08 (existing flow + status card).   |
+  | 8 Android vs iOS                          | C-09.                                 |
+  | Neutral, configurable wording             | Already: codes in IndexedDB on device;|
+  |                                           | payload never contains text (C-06).   |
+  +-------------------------------------------+---------------------------------------+
+
+6.3 Changes - notifications (Area C)
+--------------------------------------------------------------------------------
+C-01  Activate FCM web push (configuration)
+  Existing file   : js/firebase-config.js FCM_VAPID_KEY
+  Modification    : YOU generate the Web Push key pair in Firebase console (Project
+                    settings -> Cloud Messaging -> Web Push certificates) and paste the
+                    PUBLIC key. If the browser API key is API-restricted, allow
+                    "Firebase Installations API" and "FCM Registration API".
+                    (Not done by me - no production credentials are generated.)
+  Reason          : Without it, getToken() is never called (push.js loadMessaging()).
+  Security        : The VAPID public key is public by design.
+  Dependencies    : None.  Testing: T-20, T-21.
+
+C-02  Deploy the Cloud Functions (configuration)
+  Existing file   : functions/index.js (REGION, ALLOWED_UIDS), firebase.json
+  Modification    : Confirm REGION matches the Firestore location; Blaze plan; set a
+                    budget alert; firebase deploy --only functions.
+  Reason          : Pushes are sent only by these functions.
+  Security        : Functions use the Admin SDK; they read only sessions/pushTokens
+                    (and later attachment prefixes for cleanup).
+  Dependencies    : Blaze plan.  Testing: T-20..T-27, function logs.
+
+C-03  Notification click handling   (detailed in Section 7)
+
+C-04  Click handler for the in-page fallback notification
+  Existing file   : js/notifications.js notifyPrivate()
+  Modification    : When the 'new Notification()' fallback is used, set onclick =
+                    window.focus() + close + show privacy cover (D-3). Prefer the SW
+                    path whenever a registration exists (already the case).
+  Testing         : T-28 (desktop without SW).
+
+C-05  Token lifecycle (expiry / refresh / cleanup)
+  Existing file   : js/push.js enablePush()/disablePush(), js/app.js syncPush(),
+                    functions/index.js pushTo()
+  Modification    :
+    - Call enablePush() (getToken) at every session start AND when the page becomes
+      visible if the last sync is > 24 h old; always rewrite updatedAt.
+    - Also re-enable when Notification.permission === 'granted' but the local pref
+      was lost (cleared storage).
+    - Functions: skip and delete tokens with updatedAt older than 60 days (FCM tokens
+      of inactive installs go stale); keep the existing dead-token deletion.
+    - If D-4b (device-bound): store a random deviceId with the token and push to all
+      fresh tokens of the account (no authTime filter); Settings lists devices with
+      "Remove". If D-4a: delete token docs whose authTime is older than the current
+      session during pushTo().
+    - Optional: 'pushsubscriptionchange' in sw.js cannot call the FCM SDK; the next
+      app open re-syncs (documented limitation).
+  Rules           : pushTokens schema gains optional 'deviceId' (D-4b) - Section 11.
+  Security        : Token docs remain owner-only; payload content-free, so stale or
+                    extra devices learn only "something happened".
+  Testing         : T-23, T-24.
+
+C-06  Payload and metadata review (keep content-free)
+  Existing file   : functions/index.js, sw.js
+  Verified today  : data = { k } only; webpush headers Urgency/TTL/Topic. FCM adds its
+                    own envelope fields (sender numeric ID, message id) - no content.
+  Modification    : Neutral Topic/tag names (B-03). Never add message text, sender,
+                    names, call IDs or Firestore paths - this also stays true after
+                    E2EE (functions cannot decrypt anyway). No 'notification' block
+                    in the FCM message (data-only, so the device text decides).
+  Security        : Push services (Google FCM, Apple, Mozilla) see only timing and the
+                    neutral topic.
+
+C-07  Duplicate prevention
+  Existing file   : sw.js showCoded(), js/notifications.js notifyPrivate()
+  Modification    :
+    - Use the SAME rule in both places: suppress only if an app window is visible AND
+      focused (WindowClient.focused in SW; document.hasFocus() in page). Fixes the
+      desktop "visible but behind another window" gap (audit B-05).
+    - Page path stays off whenever push is active on this device (existing).
+    - Burst throttle (N-6): in showCoded(), if a notification with the same tag was
+      shown < 30 s ago, replace it with renotify:false (no second sound).
+    - Keep shared tags (message / call / missed) so OS shows one per kind.
+    - iOS exception: Safari requires a visible notification for every push
+      (MUST_SHOW_EVERY_PUSH) - unavoidable; while the app is in the foreground the
+      user may see both the in-app view and a banner.
+  Testing         : T-25, T-26.
+
+C-08  Permission handling
+  Existing file   : js/permissions.js requestNotificationPermission(), js/settings.js
+                    updateNotifyNote(), js/app.js pushStatus()
+  Modification    : Keep the explain-then-ask flow and the "never re-prompt after
+                    denial" rule. Add a status card in Settings: Permission (granted/
+                    blocked/not asked), Background delivery (active/inactive + reason),
+                    "Install to Home Screen first" hint on iOS browser tabs.
+  Testing         : T-29.
+
+C-09  Android / iOS differences (document + handle)
+  +----------------------------+--------------------------------+-------------------------------+
+  | Aspect                     | Android (Chrome / installed)   | iOS / iPadOS (Safari)         |
+  +----------------------------+--------------------------------+-------------------------------+
+  | Push availability          | Tab or installed PWA           | ONLY Home Screen app, 16.4+   |
+  | Permission request         | After user gesture             | After user gesture, inside    |
+  |                            |                                | the installed app only        |
+  | Must show every push       | No (may stay silent)           | YES (else permission revoked) |
+  | Silent option              | Supported                      | Ignored (NOT VERIFIED)        |
+  | Notification header        | App name "My Offers" (PWA) or  | App name                      |
+  |                            | site origin (tab) - cannot hide|                               |
+  | Click -> focus/open        | Supported                      | Supported 16.4+ (NOT VERIFIED |
+  |                            |                                | on your devices)              |
+  | Delivery when closed       | Yes, unless force-stopped /    | Yes, may be delayed/grouped   |
+  |                            | battery-optimised (OEM)        |                               |
+  | Call ringing when closed   | Normal notification only (web  | Same                          |
+  |                            | limit)                         |                               |
+  +----------------------------+--------------------------------+-------------------------------+
+
+C-10  Configurable neutral wording (existing, keep)
+  Existing file   : js/notify-config.js, js/settings.js, sw.js codedText()
+  Modification    : Keep codes on-device. Optional: add per-kind "title" so each event
+                    can look like a different ordinary topic. Validation (length,
+                    charset for codes) already exists. No text ever leaves the device.
+
+
+================================================================================
+7. NOTIFICATION CLICK BEHAVIOUR
+================================================================================
+
+7.1 Current behaviour and root cause (VERIFIED)
+--------------------------------------------------------------------------------
+  sw.js:
+     self.addEventListener('notificationclick', (event) => {
+       event.notification.close();          // and nothing else
+     });
+  So tapping a notification on the phone closes it and does NOT open the app. The
+  in-page fallback notification has no click handler at all.
+
+7.2 Required behaviour
+--------------------------------------------------------------------------------
+  - Open or focus the installed app / website.
+  - Land on the normal homepage / sign-in experience - never the chat directly.
+  - No chat-specific URL, query, fragment, message ID or deep link.
+  - Never bypass authentication; normal session checks still apply.
+  - Reveal nothing after the click.
+
+7.3 Planned design (C-03)
+--------------------------------------------------------------------------------
+  sw.js 'notificationclick':
+    1. event.notification.close()
+    2. event.waitUntil( async () => {
+         const scopeUrl = self.registration.scope;          // e.g. https://host/  (no query/hash)
+         const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+         const mine = wins.filter(w => w.url.startsWith(scopeUrl));
+         if (mine.length) {
+           const w = mine[0];
+           await w.focus();
+           w.postMessage({ t: 'nc' });     // neutral, carries no data
+         } else {
+           await clients.openWindow(scopeUrl);   // plain scope URL only
+         }
+       })
+    No notification 'data' field is read or written (stays empty).
+
+  Page side (js/app.js, listener on navigator.serviceWorker 'message'):
+    - Accept only messages from the active service worker with { t: 'nc' }.
+    - If NOT signed in (fresh window, or after browser restart): nothing special -
+      the normal homepage is shown; signing in follows the normal flow.
+    - If signed in (window already open):
+        D-3a (recommended): show the PRIVACY COVER = homepage look over the app.
+             Unlock options (choose one): re-enter the account password
+             (reauthenticateWithCredential - real server check), or after Phase 4
+             the encryption passphrase/PIN (local). While covered, chat DOM is
+             hidden (display:none), not just overlaid. Optional: same cover after X
+             minutes hidden (auto-lock).
+        D-3b: focus only, app shown as it was.
+
+  Why this satisfies "do not bypass authentication": a fresh window always starts
+  at the homepage and needs the password (session-only sign-in); an existing window
+  is already authenticated, and with D-3a it is additionally locked behind the cover.
+
+7.4 Platform notes
+--------------------------------------------------------------------------------
+  - clients.openWindow() works only inside notificationclick (user activation) and
+    only for URLs in the SW scope - the plain scope URL satisfies both.
+  - Android installed PWA: openWindow opens the PWA window (Chrome decides app vs
+    tab by scope; NOT VERIFIED per device).
+  - iOS 16.4+: openWindow / focus supported for Home Screen apps (NOT VERIFIED on
+    your devices).
+  - If both a browser tab and the installed PWA are open, the first matching client
+    is focused.
+  - Testing: T-30..T-34.
+
+
+================================================================================
+8. END-TO-END ENCRYPTION ARCHITECTURE
+================================================================================
+
+8.1 Goals and threat model
+--------------------------------------------------------------------------------
+  Protect message CONTENT (and later photos) from: Firebase/Google Cloud operators,
+  anyone with project console access, a leaked service account, Firestore backups,
+  and an attacker who knows only a Firebase login password.
+  NOT protected: metadata (who/when, sizes, read times, presence, call logs), a
+  compromised/unlocked device, malicious code served by the website itself (a web
+  app can always be changed by whoever controls hosting - inherent to web E2EE),
+  screenshots by the other user.
+
+8.2 Primitive choice (no homemade protocol)
+--------------------------------------------------------------------------------
+  Use only standard primitives from the browser Web Crypto API (no new library):
+   - Key agreement  : ECDH on NIST P-256 (universally supported; X25519 support in
+                      browsers is still uneven).
+   - Key derivation : HKDF-SHA-256 (RFC 5869).
+   - Encryption     : AES-256-GCM (NIST SP 800-38D), 96-bit random IV, 128-bit tag.
+   - Passphrase KDF : PBKDF2-HMAC-SHA-256, >= 600,000 iterations (OWASP guidance;
+                      Argon2id would be stronger but needs a WebAssembly library).
+   - Hash           : SHA-256 for fingerprints and attachment integrity.
+  Construction = static-static Diffie-Hellman + KDF + AEAD, the same structure as
+  NaCl/libsodium "crypto_box" and HPKE's authenticated mode. This is a well-known
+  construction, not a new protocol.
+  Trade-offs (be explicit):
+   - No forward secrecy: if a private key AND stored ciphertext are both obtained,
+     all messages under that key can be decrypted. Mitigation: key rotation epochs
+     (8.7). Signal-style double ratchet would need a maintained library (none is
+     officially supported for browsers) - out of scope.
+   - Alternative with a dependency: libsodium.js (crypto_box / secretstream) - well
+     audited, ~200 KB, adds a dependency. Not recommended given "no unnecessary
+     dependencies", but acceptable if you prefer audited high-level APIs.
+   - Recommendation: have the final crypto module reviewed by a second person.
+
+8.3 Keys
+--------------------------------------------------------------------------------
+  Per user:
+   - Identity key pair IK = ECDH P-256. keyId = first 16 hex chars of
+     SHA-256(SPKI(public)).
+   - (Phase 4b) Signing key pair = ECDSA P-256 for signing SDP fingerprints (S-08)
+     and the key-change log.
+  Conversation key (both users derive the same):
+     shared = ECDH(myPriv, peerPub)                         (256 bits)
+     salt   = SHA-256( sort(SPKI_A, SPKI_B) concatenated )
+     CK     = HKDF-SHA-256(shared, salt, info = "mo/v1/main") -> AES-GCM-256,
+              non-extractable CryptoKey, kept in memory only.
+  Per attachment: a fresh random AES-256-GCM file key (Section 9).
+
+8.4 Private key protection, backup and recovery (D-6)
+--------------------------------------------------------------------------------
+  Why a SEPARATE encryption passphrase (never the login password): the login
+  password is sent to Firebase; anyone controlling Firebase could then derive the
+  key. Also an email password reset would destroy access to all messages.
+  Stored in Firestore users/{uid}/private/keyBackup (owner-only read):
+     { v:1, keyId, kdf:'PBKDF2-SHA256', iter:600000, salt(16B), iv(12B),
+       wrapped: AES-GCM( PBKDF2(passphrase), PKCS8(privateKey) ),
+       rcIv, rcWrapped: AES-GCM( recoveryKey, PKCS8(privateKey) ) }
+  - Recovery key: 128+ random bits shown ONCE as a printable code (e.g. 8 groups of
+    4 characters). If BOTH passphrase and recovery code are lost, encrypted history
+    is permanently unreadable (by design).
+  - Unlock flow: after successful sign-in and session claim, a neutral "Enter your
+    security code" screen; the private key is unwrapped into a NON-extractable
+    CryptoKey held in memory; cleared on logout/teardown (page reload).
+  - Optional "Remember this device" (D-6): store the non-extractable CryptoKey in
+    IndexedDB (structured clone keeps it non-extractable). Trade-off: device theft
+    + browser profile access = decryption without passphrase; conflicts with the
+    "nothing left on the device" policy. Default OFF.
+  - Brute-force resistance of the backup depends on passphrase strength: require
+    >= 12 characters or 4+ random words; show a strength hint.
+  - Never stored: passphrase, recovery code, raw private key, CK - in any storage
+    or log.
+
+8.5 Public key publication and verification
+--------------------------------------------------------------------------------
+  - users/{uid}/keys/{keyId}: { alg:'ECDH-P256', spki (Bytes), createdAt } -
+    readable by both members, created only by the owner, immutable (no update/
+    delete). Rotation = new keyId.
+  - Safety number: SHA-256( sort(SPKI_A, SPKI_B) ), shown as 12 groups of 5 digits
+    (and optionally compared during a call). Both users compare once.
+  - Trust record users/{uid}/private/trust: { peerKeyId, verifiedAt, mac } where the
+    record is MACed/encrypted with a key derived from the user's OWN private key, so
+    a server-side attacker cannot forge "verified".
+  - Key-change warning: if the peer's current keyId differs from the trusted one,
+    sending is paused and a warning asks to re-verify.
+  - Honest limit: until users compare safety numbers, a server-side attacker could
+    substitute public keys (MITM). Verification closes this.
+
+8.6 Message format (schema v2) and processing
+--------------------------------------------------------------------------------
+  conversations/main/messages/{messageId}
+    { senderId, createdAt (server), deleted:false, v:2, kid, iv (Bytes 12), ct (Bytes) }
+  Plaintext before encryption (JSON, then padded to a multiple of 256 bytes to hide
+  exact length):
+    { t:'text', body:'...' }                                  text message
+    { t:'image', items:[ {fileId, thumbId, key, iv, tIv, sha256, tSha256, w, h,
+                           mime, bytes} ] }                    photo message (Sec. 9)
+  AAD (authenticated, not encrypted): "mo|v2|main|<messageId>|<senderId>|<kid>"
+  -> ciphertext cannot be moved to another message/sender undetected.
+  kid = "<keyIdA>.<keyIdB>" (sorted) identifies which key pair epoch was used.
+  Changes in js/chat.js (Area D):
+   - sendMessage()/writeMessage(): encrypt before setDoc (messageId already
+     generated client-side - required for AAD).
+   - toMessage(): decrypt (async; cache plaintext in the in-memory Map only); failed
+     decryption -> bubble "This message can't be displayed" (+ reason in console).
+   - updateSidebarPreview(), unread counter: use decrypted text.
+   - deleteMessage() "for everyone": set ct = empty Bytes, iv = empty, deleted=true.
+   - Max length: the 4000-char limit stays client-side; rules bound ct size.
+  Firestore stores only ciphertext; the memory-only cache keeps plaintext off disk.
+
+8.7 Key rotation
+--------------------------------------------------------------------------------
+  New identity key -> new keyId -> new kid for new messages. Old private keys stay in
+  keyBackup (array "history", each wrapped) so history remains readable. Deleting an
+  old private key = "crypto-shredding" of messages encrypted under it.
+
+8.8 Migration of existing plaintext messages (D-7)
+--------------------------------------------------------------------------------
+  Step 1  Deploy dual-mode rules (accept v1 plaintext AND v2 encrypted).
+  Step 2  Both users set up keys (app prompts after sign-in).
+  Step 3  Client sends v2 only when BOTH public keys exist; otherwise blocks sending
+          with a "waiting for the other device to finish setup" note (no plaintext
+          fallback once a user has keys).
+  Step 4  Re-encryption (D-7 option "re-encrypt"): each SENDER's app re-encrypts its
+          own v1 messages in batches (rules allow sender-only v1 -> v2 conversion,
+          createdAt unchanged). The receiver cannot convert the other person's
+          messages. Option "erase": existing erase-for-everyone. Option "keep":
+          labelled "Not encrypted" bubbles.
+  Step 5  Flip rules to v2-only creates; later remove v1 read compatibility only if
+          no v1 docs remain.
+  Honest limit: copies of old plaintext may persist in Firestore backups / PITR /
+  Google's deletion pipeline for their retention period.
+
+8.9 Interactions with other features
+--------------------------------------------------------------------------------
+  - Notifications: unchanged and still content-free; functions read only
+    senderId/deleted (and never could decrypt).
+  - Receipts, typing, presence, calls: unchanged (metadata, not content).
+  - Password-only attacker: can sign in and see metadata, delete (unless D-5
+    restricts) and place calls, but cannot read or forge messages (forged messages
+    fail decryption/AAD). Calls stay a residual risk until SDP signing (8.10).
+  - Search: impossible server-side (local only).
+
+8.10 Call signalling authentication (later, Phase 6 / optional)
+--------------------------------------------------------------------------------
+  Sign the DTLS fingerprint lines of each SDP with the ECDSA identity key; the
+  receiver verifies against the trusted peer key before accepting. Files:
+  js/calls.js (startCall, acceptCall, watchCallDoc), js/webrtc.js. Rules allow an
+  extra 'sig' field on calls.
+
+
+================================================================================
+9. PHOTO UPLOAD ARCHITECTURE
+================================================================================
+
+9.1 End-to-end flow (encrypted - matches your intended architecture)
+--------------------------------------------------------------------------------
+  Sender:
+   1. Tap attach icon -> <input type="file" accept="image/jpeg,image/png,image/webp"
+      multiple> (gallery / camera roll / file picker).
+   2. Client validation per file:
+        a) size <= input limit (e.g. 25 MB before processing),
+        b) MAGIC BYTES: JPEG FF D8 FF; PNG 89 50 4E 47 0D 0A 1A 0A; WebP "RIFF"....
+           "WEBP" (extension and browser MIME are NOT trusted),
+        c) decode with createImageBitmap() - must succeed,
+        d) pixel limit (e.g. <= 50 MP) to avoid memory exhaustion.
+      SVG, GIF, HEIC-as-is, PDF and everything else rejected.
+   3. Re-encode on a canvas: long edge <= 2048 px, JPEG quality ~0.85 (PNG kept when
+      it has transparency, D-8). This STRIPS EXIF/GPS metadata and neutralises
+      polyglot files. Thumbnail: long edge 320 px.
+   4. Preview tray under the composer: thumbnails with "x" to remove before sending.
+   5. On send, for each photo: new messageId; random fileKey + iv; ciphertext =
+      AES-256-GCM(fileKey, iv, imageBytes, AAD "mo|img|<messageId>|<fileId>");
+      same for the thumbnail with its own key/iv; sha256 of each ciphertext.
+   6. Upload ciphertexts with uploadBytesResumable() to
+      att/main/<senderUid>/<messageId>/<fileId>  (contentType application/octet-stream)
+      -> progress bar per photo, Cancel = task.cancel(), Retry keeps the encrypted
+      blob in memory.
+   7. After BOTH uploads succeed, create the message doc (v2) whose ENCRYPTED payload
+      contains {fileId, thumbId, key, iv, tIv, sha256, tSha256, w, h, mime, bytes}.
+      The other user is notified only now, so no broken images.
+  Receiver:
+   8. Bubble shows a placeholder; when scrolled into view (IntersectionObserver):
+      getBytes() the thumbnail ciphertext -> verify sha256 -> decrypt -> verify magic
+      bytes -> Blob(type from allowlist) -> URL.createObjectURL -> <img>.
+   9. Tap -> lightbox modal: same for the full image; pinch/zoom by CSS; close.
+  10. Object URLs revoked when the bubble is removed and at teardown.
+
+  What Firebase sees: random-looking bytes in Storage, ciphertext in Firestore, the
+  storage path (sender UID, messageId), object sizes and timestamps. No pixels, no
+  EXIF, no dimensions, no file names.
+
+9.2 Key / IV / tag / metadata handling
+--------------------------------------------------------------------------------
+  +----------------------+------------------------------------------------------------+
+  | Item                 | Where it lives                                             |
+  +----------------------+------------------------------------------------------------+
+  | fileKey (256-bit)    | Only inside the E2EE-encrypted message payload             |
+  | IV (96-bit)          | Inside the encrypted payload (unique per object)           |
+  | GCM tag (128-bit)    | Appended to the ciphertext by Web Crypto (integrity)       |
+  | sha256(ciphertext)   | Inside the encrypted payload (detects object swap)         |
+  | width/height/mime    | Inside the encrypted payload                               |
+  | Storage path         | Derivable from senderId + messageId (plaintext metadata)   |
+  | Original filename    | Never stored                                               |
+  +----------------------+------------------------------------------------------------+
+  A per-file key (instead of using the conversation key directly) keeps attachment
+  encryption independent of key rotation and allows future forwarding without
+  re-uploading.
+
+9.3 UI changes (preserving the composer)
+--------------------------------------------------------------------------------
+  index.html  : attach button (new icon in the SVG sprite) left of #message-input;
+                hidden file input; preview tray above the composer; lightbox modal.
+  css/chat.css: image bubble (max-width ~70% on mobile, 320 px desktop, aspect-ratio
+                from w/h to avoid layout jumps), progress overlay, tray, lightbox.
+  css/responsive.css: tray/lightbox mobile tweaks.
+  js/chat.js  : buildNode()/updateNode() render kind 'image'; sendMessage() accepts
+                attachments; send button enabled when text OR photos selected;
+                Enter behaviour unchanged.
+  New js/attachments.js : validation, processing, encryption, upload, download,
+                decrypt, object-URL lifecycle (keeps chat.js changes small).
+  Text messaging and existing bubbles remain unchanged.
+
+9.4 Limits and trade-offs (D-8)
+--------------------------------------------------------------------------------
+  - 5 MB processed limit: a 2048 px JPEG is typically 0.3-1.5 MB, so 5 MB is ample;
+    larger limits raise Storage/egress cost and memory use (Web Crypto AES-GCM is
+    not streaming - the whole file is in memory; phones may fail above ~50 MB).
+  - Max 10 photos per send: keeps memory and upload time reasonable.
+  - Re-encoding reduces quality slightly and drops metadata (a privacy GAIN).
+  - iPhone HEIC: iOS usually converts to JPEG for file inputs that do not accept
+    HEIC (NOT VERIFIED on your devices); unsupported results are rejected with a
+    message.
+  - Saving images to the device writes plaintext outside the app (default OFF).
+
+
+================================================================================
+10. FIREBASE STORAGE INTEGRATION REQUIREMENTS
+================================================================================
+
+  E-01  Bucket and plan
+        The config names a bucket "<projectId>.firebasestorage.app" (new-style
+        default bucket). New-style default buckets require the Blaze plan (needed
+        for Functions anyway). Whether the bucket exists: NOT VERIFIED. Create it in
+        the console (location close to Firestore). Check current Storage pricing.
+  E-02  Initialization
+        js/firebase.js: lazy import of
+        https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js and
+        getStorage(app) - same pinned SDK version (no new dependency). Loaded only
+        after authorization.
+  E-03  Security rules: new storage.rules + firebase.json "storage" block + emulator
+        port. Rules (illustrative):
+          isActive(): request.auth != null
+                && request.auth.uid in [UID1, UID2]
+                && firestore.get(/databases/(default)/documents/sessions/
+                     $(request.auth.uid)).data.authTime == request.auth.token.auth_time
+          match /att/{conv}/{senderId}/{messageId}/{fileId}
+            read   : isActive() && conv == 'main'
+            create : isActive() && conv == 'main' && senderId == request.auth.uid
+                     && fileId.matches('^[A-Za-z0-9]{20,32}$')
+                     && messageId.size() <= 64
+                     && request.resource.size <= MAX (5 MB + 16 B tag + margin)
+                     && request.resource.contentType == 'application/octet-stream'
+            update : false   (no overwrite of an existing object)
+            delete : false   (cleanup by Cloud Functions only - E-06)
+          everything else: denied.
+        Cross-service rules (firestore.get from Storage rules) need the console to
+        grant the Storage rules service access to Firestore (prompt on first deploy)
+        and each check costs one Firestore read.
+        IMPORTANT LIMIT: because files are encrypted, rules CANNOT verify that the
+        object is an image. Type validation happens on the sender (magic bytes +
+        decode + re-encode) AND on the receiver after decryption (magic bytes +
+        decode). Rules enforce identity, path, size, content type label and no
+        overwrite.
+  E-04  CORS for downloads
+        getBytes()/getBlob() fetch through the SDK (respecting rules) and require a
+        CORS policy on the bucket allowing GET from the app origin (gcloud storage
+        buckets update --cors-file). Configuration step - NOT done.
+  E-05  Download URLs
+        Do NOT use getDownloadURL() (long-lived bearer URLs that bypass rules). Use
+        getBytes(). Client-SDK uploads may still attach a download token; since the
+        object is ciphertext this reveals nothing readable. Optional: a function
+        removes the token metadata after upload.
+  E-06  Cleanup (Cloud Functions, Admin SDK)
+        - onDocumentUpdated(messages): deleted false -> true  => delete prefix
+          att/main/<senderId>/<messageId>/.
+        - onDocumentDeleted(messages)                          => same.
+        - onSchedule daily: delete objects older than 24 h whose message doc does not
+          exist (orphans from cancelled/failed sends).
+        - "Delete for me" keeps objects (the other user still sees them).
+        Note: GCS soft-delete (default 7 days on new buckets) keeps deleted objects
+        recoverable by admins for that period - only ciphertext after E2EE.
+  E-07  App Check enforcement for Storage (with F-01).
+  E-08  Service worker: Storage traffic is cross-origin and never cached by sw.js
+        (verified: only same-origin + SDK URLs are cached). No change required.
+  E-09  CSP: img-src already allows blob:; connect-src currently "https:" covers
+        firebasestorage.googleapis.com; when narrowing (F-06) add it explicitly.
+  E-10  Configuration constants in js/firebase-config.js: MAX_IMAGE_BYTES,
+        MAX_IMAGE_EDGE, MAX_PHOTOS_PER_SEND, THUMB_EDGE (must match storage.rules).
+
+
+================================================================================
+11. DATABASE AND SECURITY-RULE CHANGES
+================================================================================
+
+11.1 Firestore (firestore.rules) - deployed BEFORE the client that needs them
+--------------------------------------------------------------------------------
+  +-------------------------------------+---------------------------------------------------+
+  | Path                                | Change                                            |
+  +-------------------------------------+---------------------------------------------------+
+  | conversations/main/messages/{id}    | CREATE: accept v1 (existing) OR v2:               |
+  |                                     |  keys exactly [senderId, createdAt, deleted, v,   |
+  |                                     |  kid, iv, ct]; v == 2; iv is bytes, size 12;      |
+  |                                     |  ct is bytes, 1..24000 bytes; kid string <= 40;   |
+  |                                     |  senderId == me; createdAt == request.time;       |
+  |                                     |  deleted == false.                                |
+  |                                     | UPDATE (delete for everyone, v2): sender only;    |
+  |                                     |  changed keys [ct, iv, deleted, deletedAt];       |
+  |                                     |  ct/iv empty; deleted true; deletedAt == time.    |
+  |                                     | UPDATE (migration v1 -> v2): sender only; no 'v'  |
+  |                                     |  before; result has v2 keys and no 'text';        |
+  |                                     |  createdAt unchanged.                             |
+  |                                     | DELETE: per D-5 (keep / sender-only / none).      |
+  |                                     | Final phase: remove v1 CREATE.                    |
+  | users/{uid}/keys/{keyId}            | NEW. read: isActive(); create: owner, keyId       |
+  |                                     |  matches ^[0-9a-f]{16}$, keys [alg, spki,         |
+  |                                     |  createdAt], spki bytes <= 200, createdAt == time;|
+  |                                     |  update/delete: false.                            |
+  | users/{uid}/private/keyBackup       | NEW docId branch: owner read/create/update; fixed |
+  |                                     |  keys; bytes sizes bounded. Never readable by the |
+  |                                     |  peer.                                            |
+  | users/{uid}/private/trust           | NEW docId branch: owner only.                     |
+  | users/{uid}/pushTokens/{id}         | Optional 'deviceId' and 'platform' fields (D-4b). |
+  | users/{uid} validUser()             | Remove legacy clearedAt/callsClearedAt (F-08)     |
+  |                                     |  after migrating values to private/markers.       |
+  | calls/{callId}                      | Optional 'sig' / 'answerSig' fields (8.10).       |
+  | (optional) rate/{uid}               | F-05 pattern: message create must be in a batch   |
+  |                                     |  updating rate/{uid}.last >= 1 s apart (getAfter).|
+  +-------------------------------------+---------------------------------------------------+
+  Tests: extend tests/rules.test.mjs for every branch (accept + reject cases).
+
+11.2 Firebase Storage (storage.rules) - NEW file (Section 10, E-03)
+
+11.3 Indexes
+--------------------------------------------------------------------------------
+  No new composite index needed (messages still ordered by createdAt). No TTL on
+  messages unless disappearing messages are added later.
+
+11.4 Data migration summary
+--------------------------------------------------------------------------------
+  M-1 Browser storage key renames (B-03)              - client, automatic.
+  M-2 Legacy cleared markers -> private/markers (F-08) - client on next sign-in.
+  M-3 Plaintext -> v2 encrypted messages (8.8, D-7)   - client per sender.
+  M-4 Push tokens: add deviceId (C-05, D-4b)          - client re-registers.
+  M-5 Origin change (B-05): reinstall PWA, re-grant notifications, re-enter codes.
+
+11.5 Deployment order (each step backward compatible)
+--------------------------------------------------------------------------------
+  rules (dual-mode) -> storage rules -> functions -> web client -> users migrate ->
+  rules tightening. Rollback: re-deploy the previous rules file + previous site.
+
+
+================================================================================
+12. EXACT FILES THAT NEED MODIFICATION
+================================================================================
+  +-------------------------------+------------------------------------------+-----------+
+  | File                          | Changes (IDs)                            | Phase     |
+  +-------------------------------+------------------------------------------+-----------+
+  | index.html                    | Homepage, sign-in sheet copy, member     | 1,2,4,5   |
+  |                               | decoy, splash, cover, key-setup/unlock   |           |
+  |                               | screen, attach button, preview tray,     |           |
+  |                               | lightbox, Tier 1/2 text (A-01..A-03,     |           |
+  |                               | A-05, A-10, B-01, C-03, D-02, E-UI)      |           |
+  | manifest.json                 | none required (already neutral); start_  | 1         |
+  |                               | url/scope if origin changes (B-05)       |           |
+  | sw.js                         | notificationclick (C-03), focus-aware    | 1,2       |
+  |                               | suppression + burst throttle (C-07),     |           |
+  |                               | neutral IDB/tag names (B-03), SHELL list |           |
+  |                               | (A-09), VERSION bump                     |           |
+  | css/style.css                 | homepage, decoy dashboard, cover, unlock | 1,2,4     |
+  | css/chat.css                  | image bubbles, tray, progress, lightbox  | 5         |
+  | css/responsive.css            | mobile tweaks for new components         | 1,5       |
+  | js/app.js                     | screen state machine, splash, neutral    | 1-5       |
+  |                               | errors, bfcache, tab lock, SW message    |           |
+  |                               | listener + cover, push re-sync, E2EE     |           |
+  |                               | unlock step in startSession              |           |
+  | js/auth.js                    | single decoy path, remove "not           | 1,3       |
+  |                               | authorized" text, MFA resolver (F-02)    |           |
+  | js/decoy.js                   | homepage + member dashboard, normal      | 1         |
+  |                               | Sign out, remove 5-tap exit (D-10)       |           |
+  | js/session.js                 | tab lock (A-07), key renames (B-03)      | 1         |
+  | js/ui.js                      | showScreen('home'/'cover'), neutral      | 1         |
+  |                               | friendlyError (A-06), modal stack fix    |           |
+  | js/firebase.js                | lazy Storage init (E-02)                 | 5         |
+  | js/firebase-config.js         | FCM_VAPID_KEY, APP_CHECK_SITE_KEY (you), | 2,3,5     |
+  |                               | image limits (E-10)                      |           |
+  | js/push.js                    | token re-sync, deviceId, key rename      | 2         |
+  | js/notifications.js           | fallback onclick (C-04), focus rule      | 2         |
+  | js/notify-config.js           | neutral DB/tag names (B-03)              | 1         |
+  | js/permissions.js             | iOS install hint (C-08)                  | 2         |
+  | js/settings.js                | status card, devices list, key/safety    | 2,4       |
+  |                               | number, recovery code, MFA enrolment,    |           |
+  |                               | key rename                               |           |
+  | js/theme-boot.js              | key rename (B-03)                        | 1         |
+  | js/chat.js                    | encrypt/decrypt, v2 schema, image kind,  | 4,5       |
+  |                               | deletion for v2, B-01/B-02 bug fixes     |           |
+  | js/presence.js                | B-02 fix (ignore estimated markers)      | 4         |
+  | js/calls.js                   | (optional) SDP signature (8.10)          | 6         |
+  | js/webrtc.js                  | (optional) fingerprint extraction        | 6         |
+  | firestore.rules               | Section 11.1                             | 2-6       |
+  | firebase.json                 | storage block, storage emulator, hosting | 1,3,5     |
+  |                               | block + headers (D-1a)                   |           |
+  | functions/index.js            | token freshness, device model, neutral   | 2,5       |
+  |                               | Topic, Storage cleanup + orphan sweep    |           |
+  | functions/package.json        | lock file; neutral package name          | 2         |
+  | tests/rules.test.mjs          | new rule cases                           | 2-6       |
+  | tests/package.json            | storage emulator, new test scripts       | 5         |
+  | README.md                     | move to private repo / rewrite (B-05)    | 1         |
+  +-------------------------------+------------------------------------------+-----------+
+  NEW files:
+   - js/e2ee.js           Web Crypto wrapper: keygen, ECDH+HKDF, AES-GCM, PBKDF2,
+                          fingerprints, base64/Bytes helpers.
+   - js/attachments.js    photo validation/processing/encryption/upload/download.
+   - storage.rules        Storage security rules.
+   - tests/storage.rules.test.mjs, tests/e2ee.test.mjs (Node's built-in WebCrypto),
+     tests/attachments.test.mjs (magic-byte validation).
+  Files NOT changed: js/webrtc.js and js/calls.js (unless 8.10), manifest.json (unless
+  origin changes), firestore.indexes.json, icons.
+
+
+================================================================================
+13. IMPLEMENTATION DEPENDENCIES
+================================================================================
+  +-----------------------------------------+-------------------------------------------+
+  | Dependency                              | Needed for                                |
+  +-----------------------------------------+-------------------------------------------+
+  | Your decisions D-1..D-10                | Everything (Section 0.3)                  |
+  | Blaze plan + budget alert               | Cloud Functions (push), Storage bucket,   |
+  |                                         | scheduled cleanup, Identity Platform      |
+  | Web Push VAPID key (you generate)       | Background push (C-01)                    |
+  | Functions deploy, REGION = DB location  | Push, Storage cleanup                     |
+  | Firebase CLI + Node 22 (deploy machine) | rules/functions/hosting/storage deploy    |
+  | Java 11+ (emulators)                    | automated rules tests                     |
+  | reCAPTCHA (v3/Enterprise) site key      | App Check (F-01)                          |
+  | Identity Platform upgrade               | TOTP MFA (F-02)                           |
+  | Storage bucket + CORS config (gcloud)   | Photo download via getBytes (E-04)        |
+  | Cross-service rules permission          | storage.rules firestore.get() (E-03)      |
+  | Custom domain (+ DNS)                   | Neutral origin (B-05)                     |
+  | Firestore PITR / scheduled backups      | Recovery (F-07)                           |
+  | Two real devices (Android + iPhone      | Notification, click, PWA, photo tests     |
+  | recommended) + a desktop                |                                           |
+  | Phase order                             | E2EE (Phase 4) BEFORE photos (Phase 5) so |
+  |                                         | photos are never stored unencrypted.      |
+  +-----------------------------------------+-------------------------------------------+
+  No new runtime JavaScript library is required. Firebase Storage comes from the
+  same pinned SDK. Optional: libsodium.js (only if you prefer it over Web Crypto).
+
+
+================================================================================
+14. RISK ASSESSMENT
+================================================================================
+  +------+------------------------------------------+--------+--------+-------------------------------+
+  | ID   | Risk                                     | Likeli.| Impact | Mitigation                    |
+  +------+------------------------------------------+--------+--------+-------------------------------+
+  | R-01 | Lost passphrase AND recovery code ->     | Medium | High   | Mandatory recovery code,      |
+  |      | encrypted history unreadable forever     |        |        | confirm-by-retyping, reminder |
+  | R-02 | E2EE bug makes messages undecryptable    | Medium | High   | Unit tests, dual-mode rollout,|
+  |      |                                          |        |        | keep v1 readable, staged flip |
+  | R-03 | Rules deployed out of order -> app       | Medium | High   | Backward-compatible rules     |
+  |      | denied                                   |        |        | first; documented order 11.5  |
+  | R-04 | Push still unreliable (OEM battery       | High   | Medium | Device guidance, status card, |
+  |      | savers, iOS delays)                      |        |        | in-page fallback; web limit   |
+  | R-05 | Blaze cost surprises                     | Low    | Medium | Budget alert, maxInstances,   |
+  |      |                                          |        |        | image size limits             |
+  | R-06 | Origin change breaks installs/push/codes | High   | Low    | One-time re-setup checklist   |
+  | R-07 | App Check enforcement locks users out    | Medium | High   | Monitor metrics before        |
+  |      |                                          |        |        | enforcing; debug tokens       |
+  | R-08 | MFA lockout (lost phone)                 | Low    | High   | Backup codes; admin can       |
+  |      |                                          |        |        | unenrol via Admin SDK         |
+  | R-09 | Decoy confuses the real user after a typo| Medium | Low    | Normal "Sign out" on decoy    |
+  |      |                                          |        |        | (D-10)                        |
+  | R-10 | Storage CORS / cross-service rules       | Medium | Medium | Emulator tests + staged       |
+  |      | misconfigured -> images fail             |        |        | console verification          |
+  | R-11 | Large images exhaust phone memory        | Low    | Medium | Pixel/size limits, sequential |
+  |      |                                          |        |        | processing                    |
+  | R-12 | Server-side key substitution (MITM)      | Low    | High   | Safety-number verification,   |
+  |      |                                          |        |        | key-change warning            |
+  | R-13 | Web-app code itself replaced by attacker | Low    | High   | Hosting access hygiene, 2FA on|
+  |      | controlling hosting/GitHub               |        |        | GitHub/Google accounts; web   |
+  |      |                                          |        |        | E2EE cannot fully prevent this|
+  | R-14 | Old plaintext remains in backups         | High   | Medium | Accept/document; retention    |
+  | R-15 | Public history already copied            | High   | Medium | Treat as known; no secrets in |
+  |      |                                          |        |        | it besides public config/UIDs |
+  | R-16 | Regression in calls/receipts/presence    | Low    | High   | Full regression suite (T-60+) |
+  +------+------------------------------------------+--------+--------+-------------------------------+
+
+
+================================================================================
+15. TESTING PLAN
+================================================================================
+  Type codes:
+    AU = automated (Firestore/Storage emulator rules tests, Node unit tests)
+    BR = semi-automated / manual in a desktop browser (DevTools)
+    DV = real device required (Android / iPhone)
+    CO = Firebase / Google Cloud console access required
+
+15.1 Disguise, authentication and session
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | ID   | Scenario                                   | Expected result                      | Type |
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-01 | Correct credentials, allowlisted UID       | Homepage -> sign in -> real app      | BR,DV|
+  | T-02 | Wrong password / unknown email             | Member decoy; no error; no Firebase  | BR   |
+  |      |                                            | session (Application tab empty)      |      |
+  | T-03 | Valid Firebase account NOT allowlisted     | Same decoy; never "not authorized";  | BR   |
+  |      |                                            | rules deny all data (AU)             | AU   |
+  | T-04 | Decoy "Sign out" and Back button           | Returns to homepage; no app DOM      | BR   |
+  | T-05 | Reload while signed in (< 10 min)          | Splash -> real app; no private text  | BR   |
+  |      |                                            | in splash                            |      |
+  | T-06 | Direct URLs: /?x, /#chat, /chat, /index.   | Always homepage / 404 page; nothing  | BR   |
+  |      | html#msg                                   | private                              |      |
+  | T-07 | Start-up failures (offline, rules denied)  | Neutral text only; codes in console  | BR,AU|
+  | T-08 | Back/forward after logout; bfcache restore | Homepage; no cached chat visible     | BR   |
+  | T-09 | Duplicate tab                              | Older tab returns to homepage        | BR   |
+  | T-10 | Logout                                     | Token removed (per D-4), offline,    | BR   |
+  |      |                                            | homepage, Back does not show chat    |      |
+  | T-11 | Session expiry / superseded login          | Old device -> homepage + notice;     | BR,AU|
+  |      |                                            | rules reject old auth_time (AU exist)|      |
+  | T-12 | Upgrade migration of storage names         | Theme & notification codes kept      | BR   |
+  | T-13 | MFA: correct password + TOTP / wrong TOTP  | App / neutral error                  | BR,CO|
+  | T-14 | Browser restart > 10 min (restore guard)   | Password required                    | BR,DV|
+  +------+--------------------------------------------+--------------------------------------+------+
+
+15.2 Notifications
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-20 | A sends, B app in background (Android)     | Coded notification on B              | DV   |
+  | T-21 | B sends, A app in background (iPhone PWA)  | Coded notification on A              | DV   |
+  | T-22 | Browser / PWA fully closed (both ways)     | Notification arrives (Android, iOS   | DV   |
+  |      |                                            | Home Screen); desktop if browser runs|      |
+  | T-23 | Token refresh: clear site data, re-login   | New token registered; pushes resume  | DV,CO|
+  | T-24 | Stale/dead tokens                          | Function deletes them (logs: counts) | CO   |
+  | T-25 | App visible and focused                    | No OS notification (Android/desktop);| DV   |
+  |      |                                            | iOS shows (platform rule)            |      |
+  | T-26 | Burst of 5 messages                        | One notification, one alert sound    | DV   |
+  | T-27 | Payload inspection                         | Only {k}; no text/name/IDs (function | CO,AU|
+  |      |                                            | unit test + DevTools push event)     |      |
+  | T-28 | Desktop fallback notification click       | Window focused, cover shown          | BR   |
+  | T-29 | Permission denied / blocked                | Help steps; no re-prompt; status card| BR,DV|
+  +------+--------------------------------------------+--------------------------------------+------+
+
+15.3 Notification click
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-30 | Tap with app closed (Android PWA)          | App opens at homepage/sign-in        | DV   |
+  | T-31 | Tap with app open & signed in              | Focus + privacy cover (D-3a)         | DV   |
+  | T-32 | Tap with browser tab (not installed)       | Tab focused/opened at scope URL only | DV,BR|
+  | T-33 | iPhone Home Screen app tap                 | App opens, sign-in required          | DV   |
+  | T-34 | URL check after tap                        | Exactly the scope URL; no query/hash | BR   |
+  +------+--------------------------------------------+--------------------------------------+------+
+
+15.4 Encryption
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-40 | Encrypt/decrypt round trip, AAD tamper,    | Decrypts; tampering fails            | AU   |
+  |      | IV uniqueness                              |                                      |      |
+  | T-41 | Passphrase wrap/unwrap, wrong passphrase,  | Correct only with right secret       | AU   |
+  |      | recovery code                              |                                      |      |
+  | T-42 | Firestore doc inspection after send        | Only v2 ciphertext fields; no text   | BR,CO|
+  | T-43 | Rules: reject v2 with extra fields, wrong  | Denied                               | AU   |
+  |      | sizes, spoofed sender; accept valid        |                                      |      |
+  | T-44 | Migration v1 -> v2 by sender only          | Allowed for sender; denied for peer  | AU   |
+  | T-45 | Existing history after migration           | All messages readable in order       | BR   |
+  | T-46 | Key change on peer                         | Warning; sending paused              | BR   |
+  | T-47 | Safety numbers match on both devices       | Identical digits                     | DV   |
+  | T-48 | Password-only attacker (no passphrase)     | Cannot read messages                 | BR   |
+  +------+--------------------------------------------+--------------------------------------+------+
+
+15.5 Photos and Storage
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-50 | Upload 1 and 10 JPEG/PNG/WebP photos       | Previews, progress, delivered,       | BR,DV|
+  |      |                                            | thumbnails + lightbox both sides     |      |
+  | T-51 | Unsupported: SVG, GIF, PDF, renamed .exe   | Rejected client-side by magic bytes  | AU,BR|
+  |      | as .jpg, polyglot                          |                                      |      |
+  | T-52 | Oversized file / huge dimensions           | Rejected with message                | BR   |
+  | T-53 | Cancel upload; network drop; retry         | Cancel works; retry succeeds; no     | BR,DV|
+  |      |                                            | message until upload complete        |      |
+  | T-54 | Storage rules: unauthenticated, non-member,| Denied                               | AU   |
+  |      | superseded session, other user's path,     |                                      |      |
+  |      | overwrite, > size, wrong content type      |                                      |      |
+  | T-55 | Stored object inspection                   | Random bytes; no JPEG header; no EXIF| CO   |
+  | T-56 | Tampered object (swap)                     | sha256/GCM failure -> "can't display"| AU   |
+  | T-57 | Delete for everyone / erase conversation   | Objects removed by function          | CO   |
+  | T-58 | Orphan cleanup                             | Removed after 24 h                   | CO   |
+  | T-59 | Desktop and mobile layout                  | Correct sizing, no layout jump       | BR,DV|
+  +------+--------------------------------------------+--------------------------------------+------+
+
+15.6 Regression (existing features)
+--------------------------------------------------------------------------------
+  +------+--------------------------------------------+--------------------------------------+------+
+  | T-60 | Text send/receive, retry, pagination       | Unchanged behaviour                  | BR,DV|
+  | T-61 | Delivered/read ticks, typing, presence     | Unchanged                            | BR,DV|
+  | T-62 | Audio and video calls, ICE restart, busy,  | Unchanged                            | DV   |
+  |      | glare, missed-call push                    |                                      |      |
+  | T-63 | Delete for me / for everyone (text, photo) | Works for v1 and v2                  | BR   |
+  | T-64 | Settings, theme, devices, PWA install      | Unchanged                            | BR,DV|
+  | T-65 | Existing rules test suite                  | All green                            | AU   |
+  +------+--------------------------------------------+--------------------------------------+------+
+
+
+================================================================================
+16. PRIORITIZED IMPLEMENTATION PHASES
+================================================================================
+
+PHASE 0 - PREPARATION (no code; mostly you, in consoles)
+  - Decide D-1..D-10.
+  - Export/backup Firestore; enable PITR / scheduled backups (F-07).
+  - Blaze plan + budget alert.
+  - Verify Auth console: sign-up off, deletion off, enumeration protection on,
+    authorized domains; API key HTTP-referrer restriction (F-03).
+  Exit criteria: decisions recorded; backup exists.
+
+PHASE 1 - DISGUISE AND EXPOSURE                         (A-01..A-08, B-01..B-05)
+  Order: B-05 repo/hosting (if D-1a/b) -> A-06/A-05 neutral errors -> A-01..A-04
+  homepage/sign-in/decoy -> A-07/A-08 sessions -> B-01/B-03 text & storage names.
+  Optional A-09/A-10.
+  Firebase config: Hosting (D-1a) + authorized domain.
+  Tests: 15.1, T-12, T-60..T-64.
+
+PHASE 2 - RELIABLE PRIVATE NOTIFICATIONS              (C-01..C-10, Section 7)
+  Order: C-01 + C-02 (config/deploy) -> C-03 click + cover -> C-05 token lifecycle
+  (+ D-4 rules) -> C-07 dedupe/throttle -> C-04, C-08, C-09.
+  Tests: 15.2, 15.3.
+
+PHASE 3 - SECURITY HARDENING                          (F-01..F-12)
+  F-01  App Check (reCAPTCHA v3/Enterprise): js/firebase-config.js key; monitor then
+        enforce for Firestore (and Storage later).
+  F-02  TOTP MFA via Identity Platform: js/auth.js resolver flow (disguised as a
+        normal "Enter 6-digit code" step); enrolment in Settings (show secret for
+        manual entry - avoids a QR-code library). Passkeys: Firebase Auth has no
+        first-party passkey sign-in; WebAuthn could only serve as a local unlock
+        (weaker, client-side).
+  F-03  Console hardening checklist (Phase 0).
+  F-04  Delete-for-everyone per D-5 (firestore.rules + js/chat.js/js/app.js texts).
+  F-05  Rate limiting: budget alert + optional rules batch pattern (11.1).
+  F-06  Real headers via Firebase Hosting: CSP (script-src self gstatic google
+        recaptcha; connect-src limited to *.googleapis.com, *.firebaseio.com,
+        firebasestorage.googleapis.com, fcmregistrations.googleapis.com; img-src self
+        data blob; frame-ancestors 'none'; object-src 'none'), HSTS, nosniff,
+        Referrer-Policy, Permissions-Policy (camera/microphone=self). Keep the
+        textContent-only rendering rule; consider Trusted Types.
+  F-07  Backups: PITR + scheduled backups; key backup is the user's responsibility.
+  F-08  Remove legacy public cleared-markers (M-2).
+  F-09  Lock files for functions/ and tests/; SDK upgrade policy.
+  F-10  Sensitive browser storage review: after changes, storage holds only prefs,
+        neutral notify codes, token hash, optional remembered key (D-6).
+  F-11  Shared github.io origin (moot if D-1a).
+  F-12  TURN with short-lived credentials + 'relay' policy when IP privacy matters.
+  Session management additions: optional idle auto-lock (cover after N minutes
+  hidden); "sign out everywhere" already inherent (newest login wins).
+  Brute force: Firebase Auth built-in throttling + (Identity Platform) reCAPTCHA
+  protection for email/password; the decoy adds no real protection.
+  Tests: T-13, T-14, T-65, header checks (BR).
+
+PHASE 4 - END-TO-END ENCRYPTION (text)                (Section 8)
+  Order: js/e2ee.js + unit tests -> rules dual-mode -> key setup/unlock UI +
+  recovery code -> public keys + safety numbers -> chat.js v2 send/receive ->
+  migration (D-7) -> fix B-01/B-02 while touching chat.js.
+  Tests: 15.4, regression.
+
+PHASE 5 - ENCRYPTED PHOTO SHARING                     (Sections 9, 10)
+  Order: bucket + CORS + storage.rules (+ emulator tests) -> functions cleanup ->
+  js/attachments.js + unit tests -> composer UI/tray/progress -> rendering +
+  lightbox -> limits.
+  Tests: 15.5, regression.
+
+PHASE 6 - FINALISATION
+  Rules: v2-only creates; remove legacy branches; optional SDP signing (8.10);
+  optional disappearing messages (expiresAt + TTL); documentation in the private repo.
+
+Rough effort guide (single developer, excluding device testing time):
+  Phase 1: medium | Phase 2: small-medium | Phase 3: medium | Phase 4: large |
+  Phase 5: large | Phase 6: small.
+
+
+================================================================================
+17. APPENDIX - WHAT CAN AND CANNOT BE HIDDEN (HONEST LIMITS)
+================================================================================
+
+Protected against CASUAL viewing (after this plan):
+  - Someone opening the site sees an ordinary deals homepage.
+  - Wrong credentials show an ordinary member dashboard, no error.
+  - Notifications show only neutral, user-chosen text; tapping opens the homepage.
+  - Tab title, app name, icons, install name are neutral.
+  - With E2EE: Firebase/Google operators, console users and backups see only
+    ciphertext for message content and photos.
+
+Still DISCOVERABLE by technical inspection (cannot be fully prevented for a web app):
+  - All JavaScript/HTML is downloadable by anyone with the URL (module names like
+    chat.js / calls.js, Firestore paths, the chat DOM or template).
+  - Network requests show the Firebase project ID ("privatechat-...") unless a new
+    project is created (D-2), and Firestore/Storage hostnames.
+  - Anything already published in the public GitHub repo (history, README, UIDs,
+    rules) may exist in clones, forks, caches and archives.
+  - Metadata: who communicates with whom, when, how often, message sizes, presence,
+    call times - visible to the service operator even with E2EE.
+  - On Android the notification header always shows the app name (or the site
+    origin for a browser tab); iOS shows the app name.
+  - A compromised or unlocked device, or the other user, can always see content.
+  - Whoever controls the hosting or the GitHub/Google accounts can change the code
+    that performs encryption (inherent to web-delivered E2EE).
+  - A correct password produces a different result (real app or MFA step) than a
+    wrong one; the decoy cannot hide that from someone who already knows the
+    password.
+
+Not possible in a pure web app:
+  - Full-screen ringing call UI when the app is closed (needs a native wrapper).
+  - Guaranteed delivery under aggressive OEM battery optimisation or on iOS when
+    the system defers pushes.
+  - Hiding the app name / origin from the OS notification header.
+  - Forcing the earpiece for call audio (documented in README).
+
+================================================================================
+                                 END OF PLAN
+================================================================================

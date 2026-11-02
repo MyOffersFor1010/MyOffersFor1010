@@ -7,7 +7,8 @@ import {
   getNotifyConfig, setNotifyConfig, NOTIFY_KINDS, CODE_PATTERN,
 } from './notify-config.js';
 
-const STORAGE_KEY = 'privatechat.prefs';
+const STORAGE_KEY = 'mo.prefs';
+const LEGACY_STORAGE_KEY = 'privatechat.prefs';   // name used up to v2.2; read once, then removed
 
 const DEFAULTS = {
   theme: 'system',          // 'system' | 'light' | 'dark'
@@ -24,7 +25,7 @@ const listeners = new Set();
 
 function load() {
   try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || '{}');
     const merged = { ...DEFAULTS };
     for (const key of Object.keys(DEFAULTS)) {
       if (typeof raw[key] === typeof DEFAULTS[key]) merged[key] = raw[key];
@@ -36,7 +37,10 @@ function load() {
 }
 
 function save() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs)); } catch { /* quota or private mode */ }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch { /* quota or private mode */ }
 }
 
 export const getPrefs = () => ({ ...prefs });

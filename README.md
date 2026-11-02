@@ -53,9 +53,9 @@ The site itself is static (GitHub Pages, no build step). Server-side logic lives
   | Missed call | Special Offer Update | Your code MC101 is available |
 
 - The codes are stored **only on the device** (IndexedDB). The push payload sent through Google carries just an event kind (`m`, `a`, `v` or `mc`), and the service worker turns it into your text.
-- **Tapping a notification** opens or focuses the app at its plain start address (no deep link, query or fragment). A newly opened app starts at the homepage and needs the password. An app that is already open and signed in locks itself behind a password screen first; its call screens, dialogs and toasts stay hidden until the password is entered. (Set `LOCK_ON_NOTIFICATION_TAP` in `js/app.js` to `false` to only bring the app to the front.) The lock check uses a separate, temporary sign-in, so the running session is not affected.
+- **Tapping a notification** opens or focuses the app at its plain start address (no deep link, query or fragment) and goes straight to a sign-in form. The conversation shows only after the correct **email and password**. A wrong entry shows the same member page as a wrong main sign-in. If the app was already open and signed in, it locks first: call screens, dialogs and toasts stay hidden, and a wrong entry also ends that session. (Set `LOCK_ON_NOTIFICATION_TAP` in `js/app.js` to `false` to only bring an open app to the front.) This second sign-in is checked with a separate, temporary sign-in, so the running session is not affected.
 - Notifications are delivered in two ways. While the app is open but not on screen (for example a background tab), the page reports events to the service worker. With background push (Blaze + Cloud Functions) they also arrive while the app or browser is closed, wherever the OS allows. **The service worker is the only place notifications are shown**, so both paths follow the same rules: none while the app is on screen and in focus (Safari must show every push), one per event kind, and a burst of messages replaces the notification silently instead of alerting once per message.
-- **Devices.** Every device where notifications were turned on keeps receiving them, also after you sign in elsewhere (for example a phone when the laptop signs in). Logging out or switching notifications off on a device stops it there. Registrations are refreshed at each sign-in and daily while the app is open; ones not refreshed for 60 days are removed by the Cloud Function.
+- **Devices.** Every device where notifications were turned on keeps receiving them **whether or not anyone is signed in on it**: after closing the app, after logging out, and after a sign-in elsewhere (for example a phone when the laptop signs in). Only the Settings switch stops them on a device. Registrations are refreshed at each sign-in and daily while the app is open; ones not refreshed for 270 days are removed by the Cloud Function. A device must have signed in and turned notifications on once to be registered.
 - The silent option uses the OS default with no app-specific ringtone. The in-app ringtone only plays while the app is open.
 
 **Messaging**
@@ -98,7 +98,7 @@ Deletions are stored in Firestore, so they survive refresh, logout and logging i
 - **Session-only sign-in.** The password is required again after the browser tab, the browser or the installed app has been closed. The sign-in token lives in sessionStorage, never in localStorage, and passwords are never stored. If a browser restores a closed session ("continue where you left off"), the app signs it out unless it was in use within the last 10 minutes.
 - **One active session per account, enforced by the server.** A new login on another device takes over immediately. The rules reject every request from the old sign-in, even with an unexpired token. The old device is notified in real time, ends any call, drops all chat data from memory and shows *"Your account was logged in on another device."*
 - Chat data is cached **in memory only**, so nothing is left on the device after closing or signing out.
-- Logout asks for confirmation, stops push to that device and reloads the page.
+- Logout asks for confirmation and reloads the page. Notifications stay on for that device; turn them off in Settings first to stop them.
 
 **Settings:** theme, sounds, private notifications and codes, microphone, camera and (desktop) speaker selection, chat history deletion, app install, display name, app info and logout.
 
@@ -338,7 +338,7 @@ Terminal calls can be deleted by a participant ("clear history for everyone"). R
 - Messages: no impersonation, validated text, server time, no edits. Only the sender can blank a message. Either member may erase messages (the whole-conversation wipe, by the owners' decision).
 - Calls: only the participants, with every transition following the state machine above, including ICE restarts.
 
-**Cloud Functions (`functions/index.js`)** run with admin rights but only read and clean up `pushTokens`. They send `{k: kind}` and nothing else, to the recipient's devices that refreshed their registration within 60 days. Their logs contain the event kind and counts only.
+**Cloud Functions (`functions/index.js`)** run with admin rights but only read and clean up `pushTokens`. They send `{k: kind}` and nothing else, to the recipient's devices that refreshed their registration within 270 days. Their logs contain the event kind and counts only.
 
 **Client-side measures:**
 - All user text is rendered with `textContent`. A strict Content-Security-Policy meta tag and frame-busting are in place.
@@ -371,7 +371,7 @@ Covers: the allowlist, single active session (claim, take-over, stale tokens rej
 1. Open `https://<user>.github.io/PrivateChat/`. The login screen shows **Install App** after a few seconds, once Chrome decides the app is installable.
 2. Sign in, then send messages both ways.
 3. Open **Settings → Notifications → Private notifications**. An explanation appears, then Chrome's prompt; allow it. Save your codes and tap **Send test**: you should see your coded title and text.
-4. Switch to another app and send a message from the other device. The notification shows only your coded text. Tapping it brings the app back behind the password screen.
+4. Switch to another app and send a message from the other device. The notification shows only your coded text. Tapping it brings the app back behind the sign-in form (email and password).
 5. Start an audio call. The microphone explanation appears, then Chrome's prompt. While connected, the call screen shows the audio-route pill. Without headphones it says *May play on loudspeaker — use headphones*.
 6. Toggle Wi-Fi off and on during a call: the screen shows "Reconnecting…", then the call continues (or ends after about 30 s if no network returns).
 7. Close Chrome completely (swipe it away) and reopen the page. The password is required.
@@ -436,7 +436,7 @@ The manual tests above need your Firebase project and real devices. They could n
 **Sessions.**
 - Two logins in the **same second** on two devices get the same `auth_time`, so both stay valid until one of them signs in again. This is a theoretical edge case.
 - Every new browser tab is a new sign-in (session-only storage), and it takes over from the previous tab or device.
-- Browser tab vs installed app: both require the password after being closed. Push keeps working for both, because the token belongs to the device and the session, not to an open page. Closing is not logging out. An explicit **Log out** stops push to that device.
+- Browser tab vs installed app: both require the password after being closed. Push keeps working for both, because the token belongs to the device and the session, not to an open page. Closing is not logging out, and neither closing nor **Log out** stops push to that device; only the Settings switch does.
 - "Continue where you left off" can restore session storage. The 10-minute restore guard catches a real browser restart, but a restart within 10 minutes keeps you signed in.
 - Firestore checks rules when a listener starts. A *modified* old client might keep receiving an already-open real-time stream until its connection is re-established. The unmodified app disconnects itself immediately, and every new read or write is rejected. Verify this with the emulator if it matters to you.
 

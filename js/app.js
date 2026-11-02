@@ -74,6 +74,13 @@ async function main() {
   initPublicPages();
   // A page restored from the back/forward cache could show a stale view: start over.
   window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
+  // A notification was tapped (sw.js, or the page's own fallback notification). Bound
+  // before any await: a window that sw.js has just opened gets the message right away.
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data?.t === 'opened-from-notification') onNotificationOpened();
+  });
+  navigator.serviceWorker?.startMessages?.();
+  window.addEventListener(NOTIFICATION_OPENED_EVENT, onNotificationOpened);
 
   if (!isConfigured() || ALLOWED_UIDS.length !== 2 || ALLOWED_UIDS.some((u) => u.startsWith('REPLACE_WITH'))) {
     console.error('Configuration missing: see js/firebase-config.js.');
@@ -100,13 +107,6 @@ async function main() {
     location.replace(homeUrl());
   });
 
-  // A notification was tapped while this window is open (sw.js, or the page's own
-  // fallback notification): lock the app behind the password screen.
-  navigator.serviceWorker?.addEventListener('message', (e) => {
-    if (e.data?.t === 'opened-from-notification') onNotificationOpened();
-  });
-  navigator.serviceWorker?.startMessages?.();
-  window.addEventListener(NOTIFICATION_OPENED_EVENT, onNotificationOpened);
   bindLockScreen();
 
   watchAuth(async (user, { rejected }) => {
@@ -325,7 +325,9 @@ async function handleLogout() {
   const inCall = priv?.calls.isInCall();
   const ok = await confirmDialog({
     title: 'Log out?',
-    text: inCall ? 'Your current call will end.' : 'You will need your password to sign in again.',
+    text: inCall
+      ? 'Your current call will end. Notifications stay on for this device (turn them off in Settings first if you do not want them).'
+      : 'You will need your password to sign in again. Notifications stay on for this device (turn them off in Settings first if you do not want them).',
     okLabel: 'Log out',
   });
   if (!ok) return;
@@ -336,9 +338,9 @@ async function performLogout() {
   if (priv?.calls.isInCall()) priv.calls.hangUp();
   closeModal('settings-modal');
   const uid = session?.user.uid;
-  // While still authenticated (the rules reject writes after sign-out): stop push to
-  // this device and mark offline.
-  await disablePush(uid).catch(() => {});
+  // This device stays registered for notifications: they keep arriving after logout
+  // (only the Settings switch turns them off). Mark offline while still authenticated
+  // (the rules reject writes after sign-out).
   await priv?.presence.stopPresence();
   stopAliveMarker();
   try {
@@ -386,16 +388,25 @@ function pushStatus() {
   return 'Background push is not available in this browser; notifications appear while the app is open.';
 }
 
-/* ---------- Lock after a notification tap ---------- */
+/* ---------- Sign-in again after a notification tap ---------- */
 
+/**
+ * Signed in here: lock the app behind a second sign-in (same email and password).
+ * Not signed in (e.g. a window sw.js has just opened): go straight to the sign-in form.
+ * Either way the conversation shows only after a correct sign-in.
+ */
 function onNotificationOpened() {
-  if (LOCK_ON_NOTIFICATION_TAP) lockApp();
+  if (session) {
+    if (LOCK_ON_NOTIFICATION_TAP) lockApp();
+    return;
+  }
+  if (isScreenShown('home') || isScreenShown('boot') || isDecoyShown()) openLogin();
 }
 
 /**
- * Hides the app behind the password screen. The session keeps running underneath
+ * Hides the app behind the sign-in screen. The session keeps running underneath
  * (messages, calls and receipts stay live), but nothing is shown and nothing is marked
- * as read until the password is entered again.
+ * as read until the email and password are entered again.
  */
 function lockApp() {
   if (!session || session.locked || !isScreenShown('app')) return;
@@ -403,9 +414,10 @@ function lockApp() {
   document.body.classList.add('locked');
   priv.chat.setChatShown(false);
   showLockError('');
+  $('lock-email').value = '';
   $('lock-password').value = '';
   showScreen('lock');
-  $('lock-password').focus();
+  $('lock-email').focus();
 }
 
 function unlockApp() {
@@ -422,26 +434,49 @@ function showLockError(message) {
   el.hidden = !message;
 }
 
+/**
+ * Wrong email or password on the lock screen: exactly like a wrong main sign-in, the
+ * member page appears. Behind it this session ends completely (offline, listeners
+ * stopped, the conversation removed from the page, signed out here and in this
+ * browser's other tabs). Notifications stay on for the device.
+ */
+async function lockFailed() {
+  const s = session;
+  if (!s) return;
+  showDecoy();
+  if (priv?.calls.isInCall()) priv.calls.hangUp();
+  await priv?.presence.stopPresence();
+  teardownSession();
+  await logout().catch(() => {});
+  announceLogout(s.user.uid);
+}
+
 function bindLockScreen() {
   const submit = $('lock-submit');
   $('lock-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const typedEmail = $('lock-email').value.trim();
     const password = $('lock-password').value;
-    const email = session?.user.email;
-    if (!session?.locked || !email) return;
-    if (!password) { showLockError('Please enter your password.'); return; }
+    const accountEmail = session?.user.email;
+    if (!session?.locked || !accountEmail) return;
+    if (!typedEmail || !password) { showLockError('Please enter your email and password.'); return; }
     showLockError('');
+    // Only the account signed in here can unlock it (not, e.g., the other member's login).
+    if (typedEmail.toLowerCase() !== accountEmail.toLowerCase()) { await lockFailed(); return; }
     setButtonLoading(submit, true);
     try {
-      await verifyPassword(email, password);
+      await verifyPassword(accountEmail, password);
+      $('lock-email').value = '';
       $('lock-password').value = '';
       unlockApp();
     } catch (err) {
-      showLockError(isWrongCredentials(err) ? 'Incorrect password.' : friendlyError(err));
+      if (isWrongCredentials(err)) await lockFailed();
+      else showLockError(friendlyError(err));   // offline, too many attempts: ordinary messages
     } finally {
       setButtonLoading(submit, false);
     }
   });
+  // Leaving the lock screen signs out completely and returns to the homepage.
   $('lock-signout').addEventListener('click', () => { if (session) performLogout(); });
 }
 

@@ -13,12 +13,12 @@
  *    the open app sends its own events here too ({t:'show'}), so one set of rules
  *    (focus check, collapsing bursts) applies to both and tabs cannot double up.
  *  - Tapping a notification opens or focuses the app at its plain start address (no
- *    query, fragment or deep link). An app that is already open locks itself behind
- *    the password screen; a newly opened one starts at the homepage.
+ *    query, fragment or deep link). The app then asks for the email and password
+ *    (an open, signed-in app locks itself first) before showing the conversation.
  */
 'use strict';
 
-const VERSION = '2.4.0';
+const VERSION = '2.4.1';
 const SHELL_CACHE = `shell-${VERSION}`;
 // The SDK URLs contain the exact version (10.12.2) and never change, so cache-first is safe.
 const SDK_CACHE = 'firebase-sdk-10.12.2';
@@ -190,8 +190,9 @@ self.addEventListener('notificationclick', (event) => {
 });
 
 /**
- * Focuses an open app window (which then locks itself, see app.js) or opens the app at
- * its plain start address. Never a deep link: nothing about the event is passed on.
+ * Focuses an open app window or opens the app at its plain start address, then tells
+ * the page so it asks for the email and password before anything else (see app.js
+ * onNotificationOpened). Never a deep link: nothing about the event is passed on.
  */
 async function openApp() {
   const start = self.registration.scope;
@@ -202,5 +203,6 @@ async function openApp() {
     await open.focus().catch(() => {});
     return;
   }
-  await self.clients.openWindow(start);
+  const opened = await self.clients.openWindow(start);
+  opened?.postMessage({ t: 'opened-from-notification' });   // straight to the sign-in form
 }

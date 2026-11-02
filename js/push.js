@@ -4,13 +4,12 @@
  *
  *  - This device's FCM token is stored in users/{uid}/pushTokens/{sha256(token)}
  *    (with the auth_time of the sign-in that registered it). The Cloud Function pushes
- *    to EVERY device of the account that turned notifications on and refreshed its
- *    registration within 60 days - also one whose session was later taken over by a
- *    sign-in elsewhere (a phone keeps notifying when the laptop signs in). The payload
- *    is content-free, so such a device learns only that something happened.
- *  - Closing the app or browser does not remove the token: coded notifications keep
- *    arriving and reveal nothing, while opening the app still requires the password.
- *    Logging out (or switching notifications off) removes it.
+ *    to EVERY device of the account that turned notifications on, whether or not it is
+ *    signed in right now: after closing the app, after logging out, and after a
+ *    sign-in elsewhere. The payload is content-free, so such a device learns only that
+ *    something happened; seeing it still needs the email and password.
+ *  - Only switching notifications off in Settings removes this device. Registrations
+ *    not refreshed for 270 days are removed by the Cloud Function.
  *  - Pushes carry only an event kind ({k:'m'|'a'|'v'|'mc'}); sw.js turns it into the
  *    coded text configured on this device.
  */
@@ -28,7 +27,7 @@ const TOKEN_ID_KEY = 'mo.device';
 const LEGACY_TOKEN_ID_KEY = 'privatechat.pushTokenId';   // name used up to v2.2
 const SYNCED_AT_KEY = 'mo.deviceSync';
 // Registrations are refreshed at every sign-in and, while the app stays open, once a
-// day. The Cloud Function drops registrations not refreshed for 60 days (stale tokens).
+// day. The Cloud Function drops registrations not refreshed for 270 days (stale tokens).
 const RESYNC_AFTER_MS = 24 * 3600_000;
 
 let messagingPromise = null;
@@ -88,7 +87,7 @@ export function pushResyncDue() {
   return Date.now() - last > RESYNC_AFTER_MS;
 }
 
-/** Stops background push for this device (notifications switched off, or logout). */
+/** Stops background push for this device (notifications switched off in Settings). */
 export async function disablePush(uid) {
   active = false;
   let id = null;

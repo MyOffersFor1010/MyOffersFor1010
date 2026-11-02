@@ -87,28 +87,33 @@
     <button id="cover-use" class="btn btn-primary" type="button">Use here</button>
   </section>
 
-  <!-- ============ Lock (shown when the open app is brought up from a notification) ============ -->
+  <!-- ============ Second sign-in (the open app was brought up from a notification).
+       Same email and password as the main sign-in; a wrong entry shows the member page. ============ -->
   <section id="lock-screen" class="login-screen" hidden aria-labelledby="lock-title">
     <div class="login-card">
       <div class="login-brand">
         <img class="brand-logo" src="assets/icons/app-icon.svg" alt="" width="54" height="54" />
         <div>
           <h1 id="lock-title">My Offers</h1>
-          <p class="muted">Enter your password to continue.</p>
+          <p class="muted">Sign in to see your saved offers.</p>
         </div>
       </div>
       <form id="lock-form" class="login-form" novalidate>
         <label class="field">
+          <span>Email</span>
+          <input id="lock-email" type="email" name="email" autocomplete="username" inputmode="email" required placeholder="you@example.com" />
+        </label>
+        <label class="field">
           <span>Password</span>
-          <input id="lock-password" type="password" name="password" autocomplete="current-password" required />
+          <input id="lock-password" type="password" name="password" autocomplete="current-password" required placeholder="••••••••" />
         </label>
         <p id="lock-error" class="form-error" role="alert" hidden></p>
         <button id="lock-submit" type="submit" class="btn btn-primary btn-block">
-          <span class="btn-label">Continue</span>
+          <span class="btn-label">Sign in</span>
           <span class="btn-spinner" aria-hidden="true"></span>
         </button>
       </form>
-      <button id="lock-signout" type="button" class="link-btn login-back">Sign out</button>
+      <button id="lock-signout" type="button" class="link-btn login-back">Back to offers</button>
     </div>
   </section>
 
@@ -416,7 +421,7 @@
           <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
           <label class="switch-row"><span>Notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
           <p id="notify-permission-note" class="muted small"></p>
-          <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one opens My Offers at its start page; if the app is already open, your password is needed to continue.</p>
+          <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one opens My Offers; sign in with your email and password to see the conversation. Notifications keep arriving after you log out — switch them off here to stop them on this device.</p>
           <p id="push-note" class="muted small"></p>
 
           <form id="notify-code-form" class="code-form" novalidate>

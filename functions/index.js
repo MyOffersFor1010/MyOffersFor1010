@@ -6,11 +6,12 @@
  *    audio call, video call, missed call). Never a name, phone number, message text,
  *    caller, call id or anything else from the database. The service worker on the
  *    device turns the kind into the coded title/text the user configured there.
- *  - Pushes go to EVERY device of the recipient that turned notifications on and
- *    refreshed its registration within TOKEN_MAX_AGE_DAYS (the app refreshes it at each
- *    sign-in and daily while open). A device keeps notifying after a sign-in elsewhere;
- *    logging out or switching notifications off on a device removes it. Older
- *    registrations are deleted here (FCM tokens of unused installs go stale).
+ *  - Pushes go to EVERY device of the recipient that turned notifications on, whether
+ *    or not someone is signed in on it right now: it keeps notifying after logout and
+ *    after a sign-in elsewhere. Only switching notifications off in Settings removes a
+ *    device. The app refreshes the registration at each sign-in and daily while open;
+ *    registrations not refreshed for TOKEN_MAX_AGE_DAYS are deleted here (FCM itself
+ *    treats tokens of devices unused for about that long as expired).
  *  - Logs contain the event kind and counts only — no uids, tokens or content.
  *
  * Deploy: see README → "Background push".
@@ -34,7 +35,7 @@ const ALLOWED_UIDS = ['wxC2B1XFgtaoIFOVTUjhBOAxoKi1', 'Ce6xiyk5gJenhC3eRNcVnnCJr
 
 const MESSAGE_TTL_S = 24 * 3600;
 const CALL_TTL_S = 40;            // a call push arriving after the ringing window is useless
-const TOKEN_MAX_AGE_DAYS = 60;
+const TOKEN_MAX_AGE_DAYS = 270;
 const DEAD_TOKEN_CODES = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',

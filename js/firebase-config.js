@@ -74,4 +74,4 @@ export const ICE_TRANSPORT_POLICY = 'all';
 /** The single shared conversation document id. Must match firestore.rules. */
 export const CONVERSATION_ID = 'main';
 
-export const APP_VERSION = '2.4.0';
+export const APP_VERSION = '2.4.1';

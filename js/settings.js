@@ -3,6 +3,7 @@
  * Nothing secret is stored here — Firebase Auth manages its own session storage.
  */
 import { $, openModal, bindModalDismiss, toast } from './ui.js';
+import { isIos, isStandalone } from './pwa.js';
 import {
   getNotifyConfig, setNotifyConfig, NOTIFY_KINDS, CODE_PATTERN,
 } from './notify-config.js';
@@ -44,6 +45,15 @@ function save() {
 }
 
 export const getPrefs = () => ({ ...prefs });
+
+/** False when no preferences were ever saved here (new device, or site data cleared). */
+export function hasStoredPrefs() {
+  try {
+    return localStorage.getItem(STORAGE_KEY) !== null || localStorage.getItem(LEGACY_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
 
 export function setPref(key, value) {
   if (!(key in DEFAULTS) || prefs[key] === value) return;
@@ -138,6 +148,11 @@ async function detectDevices() {
 /* ---------- Settings modal ---------- */
 function updateNotifyNote() {
   const note = $('notify-permission-note');
+  if (isIos() && !isStandalone()) {
+    note.textContent = 'On iPhone/iPad, notifications only work in the Home Screen app: tap Share → Add to Home Screen, open it from there and turn this on (iOS 16.4 or later).';
+    $('pref-browser-notify').disabled = !('Notification' in window);
+    return;
+  }
   if (!('Notification' in window)) {
     note.textContent = 'This browser does not support notifications (on iPhone/iPad, add the app to your Home Screen first, iOS 16.4+).';
     $('pref-browser-notify').disabled = true;

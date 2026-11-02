@@ -16,24 +16,30 @@ import { isConfigured, initAppCheck } from './firebase.js';
 import { ALLOWED_UIDS, APP_VERSION } from './firebase-config.js';
 import {
   initLoginForm, watchAuth, logout, getPeerUid, showLoginError, wasSignedInHere, currentUser,
+  verifyPassword, isWrongCredentials,
 } from './auth.js';
-import { initSettings, applyTheme, getPrefs } from './settings.js';
-import { initAudioUnlock, resetNotifications, notifyPrivate } from './notifications.js';
+import { initSettings, applyTheme, getPrefs, setPref, hasStoredPrefs } from './settings.js';
+import {
+  initAudioUnlock, resetNotifications, notifyPrivate, NOTIFICATION_OPENED_EVENT,
+} from './notifications.js';
 import { migrateNotifyConfig } from './notify-config.js';
 import {
   getAuthTime, claimSession, watchSession, claimTab, SessionSupersededError, SUPERSEDED_MESSAGE,
   startAliveMarker, stopAliveMarker, isStaleRestore, rememberSuperseded, takeSupersededNotice,
   announceLogout, onLogoutElsewhere,
 } from './session.js';
-import { initPwa } from './pwa.js';
-import { enablePush, disablePush, pushConfigured, isPushActive } from './push.js';
+import { initPwa, isIos, isStandalone } from './pwa.js';
+import { enablePush, disablePush, pushConfigured, isPushActive, pushResyncDue } from './push.js';
 import { requestNotificationPermission } from './permissions.js';
 import { initPublicPages, showHome, openLogin, showDecoy, isDecoyShown, clearPageHistory } from './decoy.js';
 import {
   $, showScreen, isScreenShown, setBootMessage, toast, confirmDialog, choiceDialog, closeModal,
-  paintAvatar, formatLastSeen, friendlyError,
+  paintAvatar, formatLastSeen, friendlyError, setButtonLoading,
 } from './ui.js';
 
+// Tapping a notification while the app is open shows the password screen instead of
+// the conversation (decision D-3). Set to false to just bring the app to the front.
+const LOCK_ON_NOTIFICATION_TAP = true;
 const PRESENCE_REFRESH_MS = 15_000;
 const TRANSIENT_ERRORS = new Set(['unavailable', 'deadline-exceeded', 'auth/network-request-failed']);
 const mobileQuery = window.matchMedia('(max-width: 820px)');
@@ -68,6 +74,13 @@ async function main() {
   initPublicPages();
   // A page restored from the back/forward cache could show a stale view: start over.
   window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
+  // A notification was tapped (sw.js, or the page's own fallback notification). Bound
+  // before any await: a window that sw.js has just opened gets the message right away.
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data?.t === 'opened-from-notification') onNotificationOpened();
+  });
+  navigator.serviceWorker?.startMessages?.();
+  window.addEventListener(NOTIFICATION_OPENED_EVENT, onNotificationOpened);
 
   if (!isConfigured() || ALLOWED_UIDS.length !== 2 || ALLOWED_UIDS.some((u) => u.startsWith('REPLACE_WITH'))) {
     console.error('Configuration missing: see js/firebase-config.js.');
@@ -93,6 +106,8 @@ async function main() {
     await logout().catch(() => {});
     location.replace(homeUrl());
   });
+
+  bindLockScreen();
 
   watchAuth(async (user, { rejected }) => {
     if (!user) {
@@ -245,6 +260,11 @@ async function startSession(user, { steal = false } = {}) {
     previousLastActive: previous?.lastActive || null, myCallsClearedAt: latestMarker(s, 'callsClearedAt'),
   });
 
+  // Permission still granted but every saved setting gone (site data cleared): the user
+  // had notifications on, so turn them back on instead of silently losing them.
+  if (!getPrefs().browserNotify && !hasStoredPrefs() && 'Notification' in window && Notification.permission === 'granted') {
+    setPref('browserNotify', true);
+  }
   // Refresh this device's push registration under the new session (no prompt here).
   if (getPrefs().browserNotify) syncPush(s);
 
@@ -276,6 +296,7 @@ function teardownSession({ otherTabActive = false } = {}) {
   stopAliveMarker({ forget: !otherTabActive });
   resetNotifications();
   closeModal('settings-modal');
+  document.body.classList.remove('locked');
   s.releaseTab?.();
 }
 
@@ -304,16 +325,22 @@ async function handleLogout() {
   const inCall = priv?.calls.isInCall();
   const ok = await confirmDialog({
     title: 'Log out?',
-    text: inCall ? 'Your current call will end.' : 'You will need your password to sign in again.',
+    text: inCall
+      ? 'Your current call will end. Notifications stay on for this device (turn them off in Settings first if you do not want them).'
+      : 'You will need your password to sign in again. Notifications stay on for this device (turn them off in Settings first if you do not want them).',
     okLabel: 'Log out',
   });
   if (!ok) return;
+  await performLogout();
+}
+
+async function performLogout() {
   if (priv?.calls.isInCall()) priv.calls.hangUp();
   closeModal('settings-modal');
   const uid = session?.user.uid;
-  // While still authenticated (the rules reject writes after sign-out): stop push to
-  // this device and mark offline.
-  await disablePush(uid).catch(() => {});
+  // This device stays registered for notifications: they keep arriving after logout
+  // (only the Settings switch turns them off). Mark offline while still authenticated
+  // (the rules reject writes after sign-out).
   await priv?.presence.stopPresence();
   stopAliveMarker();
   try {
@@ -354,10 +381,103 @@ async function handleNotificationsToggle(enable) {
 }
 
 function pushStatus() {
+  if (isIos() && !isStandalone()) return '';   // the permission note explains Home Screen install
   if (!getPrefs().browserNotify) return '';
   if (isPushActive()) return 'Background notifications are active on this device, also while the app is closed (where the OS allows).';
   if (!pushConfigured()) return 'Background push is not set up for this site, so notifications only appear while the app is open (e.g. in a background tab).';
   return 'Background push is not available in this browser; notifications appear while the app is open.';
+}
+
+/* ---------- Sign-in again after a notification tap ---------- */
+
+/**
+ * Signed in here: lock the app behind a second sign-in (same email and password).
+ * Not signed in (e.g. a window sw.js has just opened): go straight to the sign-in form.
+ * Either way the conversation shows only after a correct sign-in.
+ */
+function onNotificationOpened() {
+  if (session) {
+    if (LOCK_ON_NOTIFICATION_TAP) lockApp();
+    return;
+  }
+  if (isScreenShown('home') || isScreenShown('boot') || isDecoyShown()) openLogin();
+}
+
+/**
+ * Hides the app behind the sign-in screen. The session keeps running underneath
+ * (messages, calls and receipts stay live), but nothing is shown and nothing is marked
+ * as read until the email and password are entered again.
+ */
+function lockApp() {
+  if (!session || session.locked || !isScreenShown('app')) return;
+  session.locked = true;
+  document.body.classList.add('locked');
+  priv.chat.setChatShown(false);
+  showLockError('');
+  $('lock-email').value = '';
+  $('lock-password').value = '';
+  showScreen('lock');
+  $('lock-email').focus();
+}
+
+function unlockApp() {
+  if (!session?.locked) return;
+  session.locked = false;
+  document.body.classList.remove('locked');
+  showScreen('app');
+  priv.chat.setChatShown(!mobileQuery.matches || $('app-screen').classList.contains('show-chat'));
+}
+
+function showLockError(message) {
+  const el = $('lock-error');
+  el.textContent = message;
+  el.hidden = !message;
+}
+
+/**
+ * Wrong email or password on the lock screen: exactly like a wrong main sign-in, the
+ * member page appears. Behind it this session ends completely (offline, listeners
+ * stopped, the conversation removed from the page, signed out here and in this
+ * browser's other tabs). Notifications stay on for the device.
+ */
+async function lockFailed() {
+  const s = session;
+  if (!s) return;
+  showDecoy();
+  if (priv?.calls.isInCall()) priv.calls.hangUp();
+  await priv?.presence.stopPresence();
+  teardownSession();
+  await logout().catch(() => {});
+  announceLogout(s.user.uid);
+}
+
+function bindLockScreen() {
+  const submit = $('lock-submit');
+  $('lock-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const typedEmail = $('lock-email').value.trim();
+    const password = $('lock-password').value;
+    const accountEmail = session?.user.email;
+    if (!session?.locked || !accountEmail) return;
+    if (!typedEmail || !password) { showLockError('Please enter your email and password.'); return; }
+    showLockError('');
+    // Only the account signed in here can unlock it (not, e.g., the other member's login).
+    if (typedEmail.toLowerCase() !== accountEmail.toLowerCase()) { await lockFailed(); return; }
+    setButtonLoading(submit, true);
+    try {
+      await verifyPassword(accountEmail, password);
+      $('lock-email').value = '';
+      $('lock-password').value = '';
+      unlockApp();
+    } catch (err) {
+      if (isWrongCredentials(err)) await lockFailed();
+      else showLockError(friendlyError(err));   // offline, too many attempts: ordinary messages
+    } finally {
+      setButtonLoading(submit, false);
+    }
+  });
+  // Leaving the lock screen signs out completely and returns to the homepage.
+  $('lock-signout').addEventListener('click', () => { if (session) performLogout(); });
 }
 
 /* ---------- History deletion ---------- */
@@ -469,9 +589,14 @@ function bindGlobal() {
     if (!e.matches) { $('app-screen').classList.add('show-chat'); priv?.chat.setChatShown(true); }
   });
 
-  const attention = () => priv?.chat.onChatAttention();
+  const attention = () => { if (!session?.locked) priv?.chat.onChatAttention(); };
   window.addEventListener('focus', attention);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') attention(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    attention();
+    // Keep this device's push registration fresh while the app stays open for days.
+    if (session && getPrefs().browserNotify && pushResyncDue()) syncPush(session);
+  });
 
   const updateNetwork = () => {
     $('network-banner').hidden = navigator.onLine;

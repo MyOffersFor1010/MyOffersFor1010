@@ -6,8 +6,9 @@
 export const $ = (id) => document.getElementById(id);
 
 // boot = splash, home = public homepage, decoy = member page after a failed sign-in,
-// cover = the app is in use in another tab, app = the real application.
-const SCREENS = ['boot', 'home', 'login', 'decoy', 'cover', 'app'];
+// cover = the app is in use in another tab, lock = password needed after a
+// notification tap, app = the real application.
+const SCREENS = ['boot', 'home', 'login', 'decoy', 'cover', 'lock', 'app'];
 
 export function showScreen(name) {
   for (const s of SCREENS) $(`${s}-screen`).hidden = s !== name;

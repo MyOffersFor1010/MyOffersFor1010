@@ -244,6 +244,10 @@ svg { width: 20px; height: 20px; flex-shrink: 0; }
 .login-form .link-btn { align-self: center; }
 .login-back { display: block; margin: 18px auto 0; }
 
+/* While locked, nothing that can name the other person or show content may appear:
+   call overlays, dialogs (Settings, confirmations) and toasts stay hidden. */
+body.locked #incoming-call, body.locked #call-screen, body.locked .modal, body.locked #toast-region { display: none !important; }
+
 /* ---------- Modals ---------- */
 .modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(8, 10, 20, 0.5); backdrop-filter: blur(3px); animation: fade 0.2s ease; }

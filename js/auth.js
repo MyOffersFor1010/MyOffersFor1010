@@ -5,14 +5,17 @@
  * The client-side allowlist check below is only for a friendly error message.
  * The real enforcement is the UID allowlist in firestore.rules.
  */
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
+  initializeAuth,
+  inMemoryPersistence,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import { auth } from './firebase.js';
-import { ALLOWED_UIDS } from './firebase-config.js';
+import { ALLOWED_UIDS, FIREBASE_CONFIG } from './firebase-config.js';
 import { $, friendlyError, setButtonLoading, toast } from './ui.js';
 import { showDecoy } from './decoy.js';
 
@@ -135,6 +138,25 @@ export function watchAuth(callback) {
 
 export async function logout() {
   await signOut(auth);
+}
+
+export const isWrongCredentials = (err) => WRONG_CREDENTIALS.has(err?.code);
+
+let verifierAuth = null;
+
+/**
+ * Checks the account password for the lock screen WITHOUT touching the active sign-in.
+ * Re-authenticating the main session would give its ID token a new auth_time, which
+ * the security rules compare with sessions/{uid} - every listener would be rejected.
+ * A separate, in-memory Auth instance signs in, and is signed out straight away.
+ * Throws the Firebase error when the password is wrong.
+ */
+export async function verifyPassword(email, password) {
+  if (!verifierAuth) {
+    verifierAuth = initializeAuth(initializeApp(FIREBASE_CONFIG, 'verify'), { persistence: inMemoryPersistence });
+  }
+  await signInWithEmailAndPassword(verifierAuth, email, password);
+  await signOut(verifierAuth).catch(() => {});
 }
 
 export const currentUser = () => auth.currentUser;

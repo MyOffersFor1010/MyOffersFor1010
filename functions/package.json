@@ -1,5 +1,5 @@
 {
-  "name": "privatechat-functions",
+  "name": "app-functions",
   "private": true,
   "description": "Cloud Functions that send coded (content-free) push notifications. Requires the Blaze plan.",
   "main": "index.js",

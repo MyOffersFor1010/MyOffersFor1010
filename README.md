@@ -53,8 +53,9 @@ The site itself is static (GitHub Pages, no build step). Server-side logic lives
   | Missed call | Special Offer Update | Your code MC101 is available |
 
 - The codes are stored **only on the device** (IndexedDB). The push payload sent through Google carries just an event kind (`m`, `a`, `v` or `mc`), and the service worker turns it into your text.
-- Tapping a notification only dismisses it. It never opens a conversation.
-- Notifications are delivered in two ways. While the app is open but not on screen (for example a background tab), the page shows them. With background push (Blaze + Cloud Functions) they also arrive while the app or browser is closed, wherever the OS allows. When both paths fire for the same event, they share a tag, so you only see one notification.
+- **Tapping a notification** opens or focuses the app at its plain start address (no deep link, query or fragment). A newly opened app starts at the homepage and needs the password. An app that is already open and signed in locks itself behind a password screen first; its call screens, dialogs and toasts stay hidden until the password is entered. (Set `LOCK_ON_NOTIFICATION_TAP` in `js/app.js` to `false` to only bring the app to the front.) The lock check uses a separate, temporary sign-in, so the running session is not affected.
+- Notifications are delivered in two ways. While the app is open but not on screen (for example a background tab), the page reports events to the service worker. With background push (Blaze + Cloud Functions) they also arrive while the app or browser is closed, wherever the OS allows. **The service worker is the only place notifications are shown**, so both paths follow the same rules: none while the app is on screen and in focus (Safari must show every push), one per event kind, and a burst of messages replaces the notification silently instead of alerting once per message.
+- **Devices.** Every device where notifications were turned on keeps receiving them, also after you sign in elsewhere (for example a phone when the laptop signs in). Logging out or switching notifications off on a device stops it there. Registrations are refreshed at each sign-in and daily while the app is open; ones not refreshed for 60 days are removed by the Cloud Function.
 - The silent option uses the OS default with no app-specific ringtone. The in-app ringtone only plays while the app is open.
 
 **Messaging**
@@ -337,7 +338,7 @@ Terminal calls can be deleted by a participant ("clear history for everyone"). R
 - Messages: no impersonation, validated text, server time, no edits. Only the sender can blank a message. Either member may erase messages (the whole-conversation wipe, by the owners' decision).
 - Calls: only the participants, with every transition following the state machine above, including ICE restarts.
 
-**Cloud Functions (`functions/index.js`)** run with admin rights but only read `sessions/` and `pushTokens`. They send `{k: kind}` and nothing else, only to tokens of the recipient's current session. Their logs contain the event kind and counts only.
+**Cloud Functions (`functions/index.js`)** run with admin rights but only read and clean up `pushTokens`. They send `{k: kind}` and nothing else, to the recipient's devices that refreshed their registration within 60 days. Their logs contain the event kind and counts only.
 
 **Client-side measures:**
 - All user text is rendered with `textContent`. A strict Content-Security-Policy meta tag and frame-busting are in place.
@@ -370,7 +371,7 @@ Covers: the allowlist, single active session (claim, take-over, stale tokens rej
 1. Open `https://<user>.github.io/PrivateChat/`. The login screen shows **Install App** after a few seconds, once Chrome decides the app is installable.
 2. Sign in, then send messages both ways.
 3. Open **Settings → Notifications → Private notifications**. An explanation appears, then Chrome's prompt; allow it. Save your codes and tap **Send test**: you should see your coded title and text.
-4. Switch to another app and send a message from the other device. The notification shows only your coded text, and tapping it just dismisses it.
+4. Switch to another app and send a message from the other device. The notification shows only your coded text. Tapping it brings the app back behind the password screen.
 5. Start an audio call. The microphone explanation appears, then Chrome's prompt. While connected, the call screen shows the audio-route pill. Without headphones it says *May play on loudspeaker — use headphones*.
 6. Toggle Wi-Fi off and on during a call: the screen shows "Reconnecting…", then the call continues (or ends after about 30 s if no network returns).
 7. Close Chrome completely (swipe it away) and reopen the page. The password is required.
@@ -378,7 +379,7 @@ Covers: the allowlist, single active session (claim, take-over, stale tokens rej
 ### 7.3 Android, installed app (PWA)
 1. Tap **Install App** → Install. "My Offers" appears on the home screen and opens without the address bar.
 2. Sign in, turn on private notifications and confirm Settings shows *"Background notifications are active on this device"*.
-3. Close the app (swipe it away). From the other device, send a message, place a call and let it go unanswered. Expected: coded notifications for M, C (or V) and MC, which only dismiss when tapped.
+3. Close the app (swipe it away). From the other device, send a message, place a call and let it go unanswered. Expected: coded notifications for M, C (or V) and MC. Tapping one opens the app at the homepage.
 4. Open the app within 40 s of a call push. It asks for the password (session-only), and once you sign in the call is still ringing and can be answered.
 5. Device check: Android Settings → Apps → My Offers → Notifications must be allowed, and battery optimisation set to "unrestricted" for reliable push on Xiaomi, Oppo, Vivo, Samsung and similar.
 
@@ -402,7 +403,7 @@ Covers: the allowlist, single active session (claim, take-over, stale tokens rej
 | # | Requirement | How it is met | Status |
 |---|---|---|---|
 | 1 | PWA install, standalone, Android + desktop, iOS instructions, HTTPS | `manifest.json`, `sw.js`, `pwa.js`, GitHub Pages HTTPS | Implemented, needs device test |
-| 2 | Coded notifications, configurable title and codes, no content in payload, tap = dismiss | `notify-config.js`, `sw.js`, `functions/index.js` (`{k}` only) | Implemented. Background push needs Blaze + deploy |
+| 2 | Coded notifications, configurable title and codes, no content in payload, tap opens the start page (open app locks) | `notify-config.js`, `sw.js`, `functions/index.js` (`{k}` only) | Implemented. Background push needs Blaze + deploy |
 | 3 | Delete message / conversation / all; for me / for everyone; confirmation; persistent; authorized | `chat.js`, `calls.js`, `app.js`, rules + tests | Implemented, rules tests written |
 | 4 | Permissions: check state, explain, ask on action, help after denial, never re-prompt | `permissions.js`, `calls.js`, `settings.js` | Implemented |
 | 5 | Audio calling with accept, reject, cancel, end, states, reconnection, private call push | `calls.js`, `webrtc.js`, `notifyIncomingCall` / `notifyMissedCall` | Implemented, with browser limits in §8 |
@@ -419,7 +420,7 @@ The manual tests above need your Firebase project and real devices. They could n
 ## 8. Platform limitations (read this)
 
 **Background notifications and calls.** These limits come from the browsers and operating systems, not from this app.
-- **A web app cannot ring like a phone call when it is closed.** A push can only show a normal notification. There is no full-screen incoming-call screen, no ringtone loop, and no answering from the notification. Because you chose "tap = dismiss", you open the app yourself. A call keeps ringing for 40 s, and the app still shows it if you sign in within that time.
+- **A web app cannot ring like a phone call when it is closed.** A push can only show a normal notification. There is no full-screen incoming-call screen, no ringtone loop, and no answering from the notification. Tapping the notification opens the app at its homepage. A call keeps ringing for 40 s, and the app still shows it if you sign in within that time.
 - **Android:** push works for installed apps and Chrome while the app or browser is closed, unless the user force-stops Chrome or battery optimisation is aggressive. Some vendors delay pushes, especially Xiaomi, Oppo, Vivo, Huawei and some Samsung modes. The notification header always shows the app name ("My Offers") or, in a browser tab, the website address. That can't be hidden.
 - **iPhone/iPad:** push works only for apps added to the Home Screen, on iOS 16.4+. iOS may group or delay notifications.
 - **Desktop:** push arrives while the browser is running, even with no tab open. Nothing arrives if the browser is fully closed.

@@ -9,11 +9,16 @@
  *  - A push carries only an event kind ({k:'m'|'a'|'v'|'mc'}). It is shown with the
  *    coded title/text configured on this device — never names, message text or call
  *    details — and nothing about it is logged.
- *  - Tapping a notification only dismisses it; it does not open a conversation.
+ *  - This worker is the ONLY place notifications are shown: pushes arrive here, and
+ *    the open app sends its own events here too ({t:'show'}), so one set of rules
+ *    (focus check, collapsing bursts) applies to both and tabs cannot double up.
+ *  - Tapping a notification opens or focuses the app at its plain start address (no
+ *    query, fragment or deep link). An app that is already open locks itself behind
+ *    the password screen; a newly opened one starts at the homepage.
  */
 'use strict';
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const SHELL_CACHE = `shell-${VERSION}`;
 // The SDK URLs contain the exact version (10.12.2) and never change, so cache-first is safe.
 const SDK_CACHE = 'firebase-sdk-10.12.2';
@@ -127,20 +132,34 @@ function codedText(cfg, kind) {
 const MUST_SHOW_EVERY_PUSH = /AppleWebKit/.test(self.navigator.userAgent)
   && !/Android|Chrome\/|Chromium|Edg\//.test(self.navigator.userAgent);
 
-async function showCoded(kind) {
-  // If the app is on screen it shows the event itself; no notification needed.
-  if (!MUST_SHOW_EVERY_PUSH) {
+// Events of the same kind arriving while the previous notification is still showing
+// replace it silently instead of alerting (sound/vibration) once per message.
+const COLLAPSE_MS = 30_000;
+
+/**
+ * `force`   : "Send test" from Settings - show even while the app is in focus.
+ * `mustShow`: Safari pushes must always produce a notification.
+ */
+async function showCoded(kind, { force = false, mustShow = false } = {}) {
+  // An app window that is on screen AND in focus shows the event itself. A visible but
+  // unfocused window (e.g. behind another window on a desktop) still gets one.
+  if (!force && !mustShow) {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    if (windows.some((w) => w.visibilityState === 'visible')) return;
+    if (windows.some((w) => w.visibilityState === 'visible' && w.focused)) return;
   }
   const { title, body, silent } = codedText(await readConfig(), kind);
+  const tag = TAGS[kind];
+  const now = Date.now();
+  const showing = await self.registration.getNotifications({ tag });
+  const recent = showing.some((n) => now - (n.data?.at || 0) < COLLAPSE_MS);
   await self.registration.showNotification(title, {
     body,
-    tag: TAGS[kind],
-    renotify: true,   // a newer event replacing an older notification still alerts
+    tag,
+    renotify: !recent,   // a newer event alerts again, unless it is part of a burst
     icon: 'assets/icons/icon-192.png',
     badge: 'assets/icons/badge-96.png',
     silent,
+    data: { at: now },   // local only: when it was shown, nothing else
   });
   // The call is over: the missed-call notification replaces the incoming-call one.
   if (kind === 'mc') {
@@ -155,10 +174,33 @@ self.addEventListener('push', (event) => {
     const k = payload?.data?.k ?? payload?.k;   // FCM wraps data fields in `data`
     if (KINDS.includes(k)) kind = k;
   } catch { /* unreadable payload: still show the generic message code */ }
-  event.waitUntil(showCoded(kind));
+  event.waitUntil(showCoded(kind, { mustShow: MUST_SHOW_EVERY_PUSH }));
+});
+
+// Events detected by the open app (when background push is not active on this device).
+self.addEventListener('message', (event) => {
+  const msg = event.data;
+  if (msg?.t !== 'show' || !KINDS.includes(msg.k)) return;
+  event.waitUntil(showCoded(msg.k, { force: msg.force === true }));
 });
 
 self.addEventListener('notificationclick', (event) => {
-  // Dismiss only: never open a conversation or reveal anything from a notification.
   event.notification.close();
+  event.waitUntil(openApp());
 });
+
+/**
+ * Focuses an open app window (which then locks itself, see app.js) or opens the app at
+ * its plain start address. Never a deep link: nothing about the event is passed on.
+ */
+async function openApp() {
+  const start = self.registration.scope;
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const open = windows.find((w) => w.url.startsWith(start));
+  if (open) {
+    open.postMessage({ t: 'opened-from-notification' });   // lock before it comes to the front
+    await open.focus().catch(() => {});
+    return;
+  }
+  await self.clients.openWindow(start);
+}

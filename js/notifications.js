@@ -6,13 +6,16 @@
  * AudioContext is created/resumed on the first pointer or key event.
  *
  * Notifications are PRIVATE: they only ever show the coded title/text configured in
- * Settings (notify-config.js) — never a name, message text or call details — and
- * tapping one just dismisses it (sw.js).
+ * Settings (notify-config.js) — never a name, message text or call details. They are
+ * displayed by the service worker (sw.js); tapping one opens the app's start page.
  */
 import { getPrefs } from './settings.js';
 import { getNotifyConfig, renderNotification, NOTIFY_TAGS } from './notify-config.js';
 import { getServiceWorker } from './pwa.js';
 import { isPushActive } from './push.js';
+
+/** Fired on window when a notification shown by this page (no service worker) is tapped. */
+export const NOTIFICATION_OPENED_EVENT = 'mo-notification-opened';
 
 const BASE_TITLE = 'My Offers';
 const ICON = 'assets/icons/icon-192.png';
@@ -110,26 +113,31 @@ export function canNotify() {
 }
 
 /**
- * Shows the coded notification for an event kind ('m' | 'a' | 'v' | 'mc') while the
- * page is open but not on screen. When background push is active on this device the
- * service worker shows it instead (also when the app is closed), so it is not shown
- * twice. `force` is used by "Send test notification".
+ * Reports an event kind ('m' | 'a' | 'v' | 'mc') noticed by the open app. When
+ * background push is active on this device the push delivers it, so nothing is sent
+ * here. Otherwise the event goes to the service worker, which applies the same rules
+ * as for pushes (no notification while the app is on screen and in focus, bursts
+ * collapse) - so it never appears twice. `force` is used by "Send test".
  */
 export async function notifyPrivate(kind, { force = false } = {}) {
   if (!canNotify()) return false;
-  if (!force && (document.visibilityState === 'visible' || isPushActive())) return false;
-  const cfg = await getNotifyConfig();
-  const { title, body } = renderNotification(cfg, kind);
-  // renotify: a newer event replacing an older notification still alerts.
-  const options = { body, tag: NOTIFY_TAGS[kind], renotify: true, icon: ICON, badge: BADGE, silent: cfg.silent };
+  if (!force && isPushActive()) return false;
   try {
-    const reg = await getServiceWorker();
-    if (reg) {
-      await reg.showNotification(title, options);
-      if (kind === 'mc') closeNotification('a');   // the call is over
-    } else {
-      new Notification(title, options);   // desktop browsers without a service worker
+    const worker = (await getServiceWorker())?.active;
+    if (worker) {
+      worker.postMessage({ t: 'show', k: kind, force });
+      return true;
     }
+    // Desktop browsers without a service worker.
+    if (!force && document.visibilityState === 'visible' && document.hasFocus()) return false;
+    const cfg = await getNotifyConfig();
+    const { title, body } = renderNotification(cfg, kind);
+    const n = new Notification(title, { body, tag: NOTIFY_TAGS[kind], icon: ICON, badge: BADGE, silent: cfg.silent });
+    n.onclick = () => {
+      n.close();
+      window.focus();
+      window.dispatchEvent(new Event(NOTIFICATION_OPENED_EVENT));
+    };
     return true;
   } catch {
     return false;

@@ -87,6 +87,31 @@
     <button id="cover-use" class="btn btn-primary" type="button">Use here</button>
   </section>
 
+  <!-- ============ Lock (shown when the open app is brought up from a notification) ============ -->
+  <section id="lock-screen" class="login-screen" hidden aria-labelledby="lock-title">
+    <div class="login-card">
+      <div class="login-brand">
+        <img class="brand-logo" src="assets/icons/app-icon.svg" alt="" width="54" height="54" />
+        <div>
+          <h1 id="lock-title">My Offers</h1>
+          <p class="muted">Enter your password to continue.</p>
+        </div>
+      </div>
+      <form id="lock-form" class="login-form" novalidate>
+        <label class="field">
+          <span>Password</span>
+          <input id="lock-password" type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <p id="lock-error" class="form-error" role="alert" hidden></p>
+        <button id="lock-submit" type="submit" class="btn btn-primary btn-block">
+          <span class="btn-label">Continue</span>
+          <span class="btn-spinner" aria-hidden="true"></span>
+        </button>
+      </form>
+      <button id="lock-signout" type="button" class="link-btn login-back">Sign out</button>
+    </div>
+  </section>
+
   <!-- ============ Login screen ============ -->
   <section id="login-screen" class="login-screen" hidden aria-labelledby="login-title">
     <div class="login-art" aria-hidden="true">
@@ -391,7 +416,7 @@
           <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
           <label class="switch-row"><span>Notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
           <p id="notify-permission-note" class="muted small"></p>
-          <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one just dismisses it; open the app yourself to see what happened.</p>
+          <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one opens My Offers at its start page; if the app is already open, your password is needed to continue.</p>
           <p id="push-note" class="muted small"></p>
 
           <form id="notify-code-form" class="code-form" novalidate>

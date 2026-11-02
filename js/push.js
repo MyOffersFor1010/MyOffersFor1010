@@ -3,12 +3,14 @@
  * Cloud Functions in functions/, which run on the Blaze plan).
  *
  *  - This device's FCM token is stored in users/{uid}/pushTokens/{sha256(token)}
- *    together with the auth_time of the session that registered it. The Cloud
- *    Function only pushes to tokens of the account's CURRENT session, so a device
- *    signed out by a newer login stops receiving pushes.
+ *    (with the auth_time of the sign-in that registered it). The Cloud Function pushes
+ *    to EVERY device of the account that turned notifications on and refreshed its
+ *    registration within 60 days - also one whose session was later taken over by a
+ *    sign-in elsewhere (a phone keeps notifying when the laptop signs in). The payload
+ *    is content-free, so such a device learns only that something happened.
  *  - Closing the app or browser does not remove the token: coded notifications keep
  *    arriving and reveal nothing, while opening the app still requires the password.
- *    Logging out explicitly removes it.
+ *    Logging out (or switching notifications off) removes it.
  *  - Pushes carry only an event kind ({k:'m'|'a'|'v'|'mc'}); sw.js turns it into the
  *    coded text configured on this device.
  */
@@ -24,6 +26,10 @@ import { getServiceWorker } from './pwa.js';
 
 const TOKEN_ID_KEY = 'mo.device';
 const LEGACY_TOKEN_ID_KEY = 'privatechat.pushTokenId';   // name used up to v2.2
+const SYNCED_AT_KEY = 'mo.deviceSync';
+// Registrations are refreshed at every sign-in and, while the app stays open, once a
+// day. The Cloud Function drops registrations not refreshed for 60 days (stale tokens).
+const RESYNC_AFTER_MS = 24 * 3600_000;
 
 let messagingPromise = null;
 
@@ -68,10 +74,18 @@ export async function enablePush(uid, authTime) {
   await setDoc(tokenRef(uid, id), { token, authTime, updatedAt: serverTimestamp() });
   try {
     localStorage.setItem(TOKEN_ID_KEY, id);
+    localStorage.setItem(SYNCED_AT_KEY, String(Date.now()));
     localStorage.removeItem(LEGACY_TOKEN_ID_KEY);
   } catch { /* only used to remove it later */ }
   active = true;
   return true;
+}
+
+/** True when this device's registration should be refreshed (see RESYNC_AFTER_MS). */
+export function pushResyncDue() {
+  let last = 0;
+  try { last = Number(localStorage.getItem(SYNCED_AT_KEY)) || 0; } catch { /* storage unavailable */ }
+  return Date.now() - last > RESYNC_AFTER_MS;
 }
 
 /** Stops background push for this device (notifications switched off, or logout). */
@@ -82,6 +96,7 @@ export async function disablePush(uid) {
     id = localStorage.getItem(TOKEN_ID_KEY) ?? localStorage.getItem(LEGACY_TOKEN_ID_KEY);
     localStorage.removeItem(TOKEN_ID_KEY);
     localStorage.removeItem(LEGACY_TOKEN_ID_KEY);
+    localStorage.removeItem(SYNCED_AT_KEY);
   } catch { /* ignore */ }
   if (id && uid) await deleteDoc(tokenRef(uid, id)).catch(() => {});
   const m = await loadMessaging();

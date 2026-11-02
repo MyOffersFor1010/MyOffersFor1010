@@ -937,7 +937,9 @@ function bindUi() {
     if (active && active.status !== 'ringing') { e.preventDefault(); e.returnValue = ''; }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && active?.role === 'callee' && active.status === 'ringing') rejectCall();
+    // Not while the app is locked: the incoming-call screen is hidden then (app.js lockApp).
+    if (e.key === 'Escape' && active?.role === 'callee' && active.status === 'ringing'
+      && !document.body.classList.contains('locked')) rejectCall();
   });
 }
 
